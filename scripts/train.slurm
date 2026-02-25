@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#SBATCH --account=FILL_IN_ACCOUNT        # <-- replace with your budget
-#SBATCH --partition=westai
+#SBATCH --account=westai0047
+#SBATCH --partition=dc-hwai
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
