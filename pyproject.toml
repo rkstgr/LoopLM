@@ -24,4 +24,4 @@ build-backend = "hatchling.build"
 packages = ["src"]
 
 [tool.uv.extra-build-dependencies]
-rouge-score = ["pkg_resources"]
+rouge-score = ["setuptools"]
