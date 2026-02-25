@@ -9,14 +9,13 @@
 #SBATCH --job-name=looplm_small
 #SBATCH --output=/p/scratch/westai0047/looplm/logs/%x_%j.out
 #SBATCH --error=/p/scratch/westai0047/looplm/logs/%x_%j.err
-# Note: SLURM does not expand env vars in directives. Log dir must exist before submission:
-#   mkdir -p /p/scratch/westai0047/looplm/logs
+
 set -euo pipefail
 
 module load uv
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="${PROJECT}/LoopLM"
 CKPT_DIR="${SCRATCH}/looplm/checkpoints"
 WANDB_DIR="${SCRATCH}/looplm/wandb"
 LOG_DIR="${SCRATCH}/looplm/logs"
