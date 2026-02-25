@@ -65,10 +65,11 @@ def apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
     Returns:
         Rotated tensor of same shape as x.
     """
-    # Expand cos/sin to full head_dim: [cos_0..cos_{d/2}, cos_0..cos_{d/2}]
-    # This matches the split-half rotate_half convention.
-    cos = torch.cat([cos, cos], dim=-1)  # (seq_len, head_dim)
-    sin = torch.cat([sin, sin], dim=-1)  # (seq_len, head_dim)
+    seq_len = x.shape[2]
+    # Slice to actual sequence length, then expand to full head_dim
+    # [cos_0..cos_{d/2}, cos_0..cos_{d/2}] — matches split-half rotate_half convention
+    cos = torch.cat([cos[:seq_len], cos[:seq_len]], dim=-1)  # (seq_len, head_dim)
+    sin = torch.cat([sin[:seq_len], sin[:seq_len]], dim=-1)  # (seq_len, head_dim)
 
     # Broadcast over batch and heads: (1, 1, seq_len, head_dim)
     cos = cos.unsqueeze(0).unsqueeze(0)
