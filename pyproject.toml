@@ -8,6 +8,7 @@ dependencies = [
     "datasets",
     "wandb",
     "pyyaml",
+    "lm-eval",
 ]
 
 [project.optional-dependencies]
