@@ -41,6 +41,12 @@ class TrainerConfig:
     # Device — "auto" picks cuda > mps > cpu
     device: str = "auto"
 
+    # Periodic evaluation during training (0 = disabled)
+    eval_every: int = 0
+    eval_tasks: list[str] = field(default_factory=list)
+    eval_limit: int | None = None
+    tokenizer_id: str = "HuggingFaceTB/SmolLM2-135M"
+
 
 def _resolve_device(device: str) -> torch.device:
     if device != "auto":
@@ -139,6 +145,9 @@ class Trainer:
             if self.step % self.config.save_every == 0:
                 self.save_checkpoint()
 
+            if self.config.eval_every > 0 and self.step % self.config.eval_every == 0:
+                self.eval_checkpoint()
+
         # Final checkpoint
         self.save_checkpoint()
 
@@ -167,6 +176,61 @@ class Trainer:
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self.step = ckpt["step"]
         return self.step
+
+    # ── Periodic evaluation ───────────────────────────────────────────────────
+
+    def eval_checkpoint(self) -> dict[str, float]:
+        """Evaluate at T=1..max_recurrent_steps; log to wandb; return metrics dict.
+
+        Returns an empty dict if eval_tasks is empty or lm-eval is not installed.
+        """
+        if not self.config.eval_tasks:
+            return {}
+
+        try:
+            from src.inference.lm_eval_wrapper import LoopLMLM, run_eval, _extract_acc
+            from transformers import AutoTokenizer
+        except ImportError:
+            return {}
+
+        # Lazy-load and cache tokenizer
+        if not hasattr(self, "_tokenizer"):
+            self._tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_id)
+
+        tasks = self.config.eval_tasks
+        max_T = self.model_config.max_recurrent_steps
+
+        self.model.eval()
+        metrics: dict[str, float] = {}
+
+        print(f"\n[eval] step={self.step}  tasks={tasks}  T=1..{max_T}")
+        header = f"  {'T':>3} | " + " | ".join(f"{t:^12}" for t in tasks)
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+
+        for T in range(1, max_T + 1):
+            wrapper = LoopLMLM(
+                self.model, self._tokenizer, self.device, num_steps=T, batch_size=1
+            )
+            raw = run_eval(wrapper, tasks, self.config.eval_limit)
+            row_parts = []
+            for task in tasks:
+                acc = _extract_acc(raw, task)
+                if acc is not None:
+                    metrics[f"eval/{task}/T{T}"] = acc
+                    row_parts.append(f"{acc:^12.4f}")
+                else:
+                    row_parts.append(f"{'N/A':^12}")
+            print(f"  {T:>3} | " + " | ".join(row_parts))
+
+        print()
+        self.model.train()
+
+        if self.config.use_wandb and metrics:
+            import wandb
+            wandb.log(metrics, step=self.step)
+
+        return metrics
 
     # ── Logging ───────────────────────────────────────────────────────────────
 

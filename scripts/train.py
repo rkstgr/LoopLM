@@ -55,6 +55,14 @@ def parse_args():
     p.add_argument("--wandb-project", default="looplm")
     p.add_argument("--run-name", default=None)
 
+    # Periodic evaluation
+    p.add_argument("--eval-every", type=int, default=0,
+                   help="Evaluate every N steps (0 = disabled).")
+    p.add_argument("--eval-tasks", default="",
+                   help="Comma-separated lm-eval task names for periodic eval.")
+    p.add_argument("--eval-limit", type=int, default=None,
+                   help="Max examples per task during periodic eval (default: full).")
+
     return p.parse_args()
 
 
@@ -144,6 +152,7 @@ def main():
     args = parse_args()
 
     model_cfg = build_model_config(args.model_config, args.seq_len)
+    eval_tasks = [t.strip() for t in args.eval_tasks.split(",") if t.strip()]
     trainer_cfg = TrainerConfig(
         lr=args.lr,
         max_steps=args.max_steps,
@@ -156,6 +165,10 @@ def main():
         wandb_project=args.wandb_project,
         wandb_run_name=args.run_name,
         device=args.device,
+        eval_every=args.eval_every,
+        eval_tasks=eval_tasks,
+        eval_limit=args.eval_limit,
+        tokenizer_id=args.tokenizer_id,
     )
 
     n_params = model_cfg.num_parameters()
@@ -202,6 +215,11 @@ def main():
         if trainer.step % args.save_every == 0:
             path = trainer.save_checkpoint()
             print(f"  → Checkpoint saved: {path}")
+
+        if args.eval_every > 0 and trainer.step % args.eval_every == 0:
+            eval_results = trainer.eval_checkpoint()
+            if eval_results:
+                print(f"  → Eval at step {trainer.step}: {eval_results}")
 
     # Final checkpoint
     path = trainer.save_checkpoint()
