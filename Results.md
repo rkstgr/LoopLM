@@ -1,0 +1,52 @@
+**3.1 — Small-scale training run**
+Trained small (100M), wikitext-103-v1, 10000 steps
+Successful see
+WandB: rkstgr/looplm/hteb62kc
+```
+→ Final checkpoint: /p/scratch/westai0047/looplm/checkpoints/checkpoints/step_0010000.pt
+============================================================
+                      TRAINING SUMMARY
+           (first 1000 steps vs last 1000 steps)
+============================================================
+Metric                         First       Last          Δ
+------------------------------------------------------------
+  loss                        5.6090     3.8288    -1.7802
+  task_loss                   5.7219     3.9550    -1.7669
+  entropy                     1.1284     1.2616    +0.1332
+  avg_exit_step               2.3888     2.8413    +0.4525
+------------------------------------------------------------
+  Per-recurrent-step losses:
+  Step          First       Last          Δ
+  ------------------------------------------
+  t=1          5.7248     4.1338    -1.5910
+  t=2          5.7275     3.9619    -1.7656
+  t=3          5.7473     3.9406    -1.8067
+  t=4          5.7661     3.9463    -1.8198
+============================================================
+Verification:
+  [✓] Total loss decreased
+  [✓] Task loss decreased
+  [✓] Entropy not collapsed (> 0.1)
+[✓] Step t=4 loss < step t=1 loss
+```
+
+
+**3.3 — Recurrent depth analysis**
+=== Recurrent Depth vs. Accuracy ===
+
+| Steps |  arc_easy  |
+|-------|------------|
+|   1   |   0.2600   |
+|   2   |   0.3000   |
+|   3   |   0.3100   |
+|   4   |   0.3000   |
+
+=== Recurrent Depth vs. Accuracy ===
+
+| Steps | hellaswag  |
+|-------|------------|
+|   1   |   0.2700   |
+|   2   |   0.2800   |
+|   3   |   0.2900   |
+|   4   |   0.3100   |
+
