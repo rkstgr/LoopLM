@@ -19,7 +19,13 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.config import LoopLMConfig
-from src.training.trainer import Trainer, TrainerConfig
+from src.training.trainer import (
+    Trainer,
+    TrainerConfig,
+    make_stage_1a,
+    make_stage_1b,
+    make_stage_2,
+)
 from src.training.data import make_dataloader
 
 
@@ -46,6 +52,14 @@ def parse_args():
     p.add_argument("--beta-kl", type=float, default=0.1)
     p.add_argument("--num-recurrent-steps", type=int, default=None)
     p.add_argument("--device", default="auto")
+
+    # Multi-stage training (0 = skip that stage)
+    p.add_argument("--stage1a-steps", type=int, default=0,
+                   help="Steps for Stage 1a (T=8, constant LR 3e-4, β=0.1). 0=skip.")
+    p.add_argument("--stage1b-steps", type=int, default=0,
+                   help="Steps for Stage 1b (T=4, constant LR 3e-4, β=0.1). 0=skip.")
+    p.add_argument("--stage2-steps", type=int, default=0,
+                   help="Steps for Stage 2 (T=4, cosine LR 3e-5, β=0.05, rope 40K). 0=skip.")
 
     # Logging & checkpointing
     p.add_argument("--log-every", type=int, default=50)
@@ -153,11 +167,25 @@ def main():
 
     model_cfg = build_model_config(args.model_config, args.seq_len)
     eval_tasks = [t.strip() for t in args.eval_tasks.split(",") if t.strip()]
+
+    # Build multi-stage list (each non-zero step value enables that stage)
+    stages = []
+    if args.stage1a_steps > 0:
+        stages.append(make_stage_1a(args.stage1a_steps))
+    if args.stage1b_steps > 0:
+        stages.append(make_stage_1b(args.stage1b_steps))
+    if args.stage2_steps > 0:
+        stages.append(make_stage_2(args.stage2_steps))
+
+    # When stages are provided, max_steps is ignored (total = sum of stage steps)
+    effective_max_steps = args.max_steps if not stages else sum(s.max_steps for s in stages)
+
     trainer_cfg = TrainerConfig(
         lr=args.lr,
-        max_steps=args.max_steps,
+        max_steps=effective_max_steps,
         beta_kl=args.beta_kl,
         num_recurrent_steps=args.num_recurrent_steps,
+        stages=stages,
         log_every=args.log_every,
         save_every=args.save_every,
         checkpoint_dir=str(Path(args.output_dir) / "checkpoints"),
@@ -173,8 +201,13 @@ def main():
 
     n_params = model_cfg.num_parameters()
     print(f"Model: {args.model_config}  ({n_params/1e6:.1f}M params)")
-    print(f"Device: {trainer_cfg.device}  |  Steps: {args.max_steps}  "
-          f"|  Batch: {args.batch_size}  |  SeqLen: {args.seq_len}")
+    if stages:
+        stages_desc = " → ".join(f"{s.name}({s.max_steps})" for s in stages)
+        print(f"Device: {trainer_cfg.device}  |  Stages: {stages_desc}  "
+              f"|  Batch: {args.batch_size}  |  SeqLen: {args.seq_len}")
+    else:
+        print(f"Device: {trainer_cfg.device}  |  Steps: {args.max_steps}  "
+              f"|  Batch: {args.batch_size}  |  SeqLen: {args.seq_len}")
     print()
 
     print("Loading dataset...")
@@ -197,9 +230,9 @@ def main():
     from src.training.trainer import _infinite
     data_iter = _infinite(dataloader)
 
-    print(f"\nStarting training for {args.max_steps} steps...\n")
+    print(f"\nStarting training for {trainer_cfg.max_steps} steps...\n")
 
-    while trainer.step < args.max_steps:
+    while trainer.step < trainer_cfg.max_steps:
         batch = next(data_iter)
         diag = trainer.train_step(batch)
 

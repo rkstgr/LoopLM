@@ -1,4 +1,5 @@
 import dataclasses
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,42 @@ from torch.utils.data import DataLoader
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 from src.training.objectives import compute_looplm_loss
+
+
+@dataclass
+class StageConfig:
+    """Configuration for a single training stage."""
+    name: str
+    max_steps: int
+    lr: float = 3e-4
+    lr_schedule: str = "constant"   # "constant" | "cosine"
+    num_recurrent_steps: int = 4
+    beta_kl: float = 0.1
+    rope_base: float = 10_000.0
+
+
+def make_stage_1a(max_steps: int) -> StageConfig:
+    return StageConfig("1a", max_steps, lr=3e-4, lr_schedule="constant",
+                       num_recurrent_steps=8, beta_kl=0.1, rope_base=10_000.0)
+
+
+def make_stage_1b(max_steps: int) -> StageConfig:
+    return StageConfig("1b", max_steps, lr=3e-4, lr_schedule="constant",
+                       num_recurrent_steps=4, beta_kl=0.1, rope_base=10_000.0)
+
+
+def make_stage_2(max_steps: int) -> StageConfig:
+    return StageConfig("2", max_steps, lr=3e-5, lr_schedule="cosine",
+                       num_recurrent_steps=4, beta_kl=0.05, rope_base=40_000.0)
+
+
+def _cosine_lr(base_lr: float, step: int, total_steps: int,
+               min_ratio: float = 0.1) -> float:
+    """Cosine LR schedule with minimum floor at base_lr * min_ratio."""
+    min_lr = base_lr * min_ratio
+    if step >= total_steps:
+        return min_lr
+    return min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * step / total_steps))
 
 
 @dataclass
@@ -27,6 +64,9 @@ class TrainerConfig:
     beta_kl: float = 0.1
     # None → use model_config.max_recurrent_steps
     num_recurrent_steps: int | None = None
+
+    # Multi-stage training: if non-empty, max_steps is overridden by sum of stage steps
+    stages: list[StageConfig] = field(default_factory=list)
 
     # Logging
     log_every: int = 10
@@ -80,6 +120,15 @@ class Trainer:
         )
         self.step = 0
 
+        # Multi-stage state
+        self.stage_idx: int = 0
+        self._stage_start_step: int = 0
+        self._stage_schedule: tuple[str, float, int] | None = None  # (schedule, base_lr, total_steps)
+
+        if trainer_config.stages:
+            self.config.max_steps = sum(s.max_steps for s in trainer_config.stages)
+            self._apply_stage(trainer_config.stages[0])
+
         if trainer_config.use_wandb:
             import wandb
             wandb.init(
@@ -94,6 +143,58 @@ class Trainer:
     @property
     def num_recurrent_steps(self) -> int:
         return self.config.num_recurrent_steps or self.model_config.max_recurrent_steps
+
+    # ── Stage lifecycle ────────────────────────────────────────────────────────
+
+    def _apply_stage(self, stage: StageConfig, steps_into_stage: int = 0) -> None:
+        """Apply a stage's hyperparameters, optionally resuming mid-stage."""
+        # Update optimizer LR
+        lr = stage.lr
+        if stage.lr_schedule == "cosine" and steps_into_stage > 0:
+            lr = _cosine_lr(stage.lr, steps_into_stage, stage.max_steps)
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = lr
+
+        # Mutate config so train_step picks up new values
+        self.config.num_recurrent_steps = stage.num_recurrent_steps
+        self.config.beta_kl = stage.beta_kl
+
+        # Update RoPE base
+        self.model.rope.set_base(stage.rope_base)
+
+        # Store schedule info for _update_lr
+        self._stage_schedule = (stage.lr_schedule, stage.lr, stage.max_steps)
+
+        print(
+            f"[stage {stage.name}] T={stage.num_recurrent_steps}  β={stage.beta_kl}  "
+            f"lr={lr:.2e}  rope_base={stage.rope_base:.0f}  "
+            f"schedule={stage.lr_schedule}  steps={stage.max_steps}"
+        )
+
+    def _update_lr(self) -> None:
+        """Update LR according to current stage schedule (no-op for constant)."""
+        if self._stage_schedule is None:
+            return
+        schedule, base_lr, total_steps = self._stage_schedule
+        if schedule != "cosine":
+            return
+        steps_in_stage = self.step - self._stage_start_step
+        lr = _cosine_lr(base_lr, steps_in_stage, total_steps)
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = lr
+
+    def _maybe_advance_stage(self) -> None:
+        """Advance to the next stage if the current stage's step budget is exhausted."""
+        if not self.config.stages:
+            return
+        current_stage = self.config.stages[self.stage_idx]
+        steps_in_stage = self.step - self._stage_start_step
+        if steps_in_stage >= current_stage.max_steps:
+            next_idx = self.stage_idx + 1
+            if next_idx < len(self.config.stages):
+                self.stage_idx = next_idx
+                self._stage_start_step = self.step
+                self._apply_stage(self.config.stages[next_idx])
 
     # ── Core training step ────────────────────────────────────────────────────
 
@@ -126,6 +227,8 @@ class Trainer:
         )
         self.optimizer.step()
         self.step += 1
+        self._update_lr()
+        self._maybe_advance_stage()
 
         diag["grad_norm"] = grad_norm.detach()
         return diag
@@ -164,6 +267,8 @@ class Trainer:
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "model_config": dataclasses.asdict(self.model_config),
                 "trainer_config": dataclasses.asdict(self.config),
+                "stage_idx": self.stage_idx,
+                "stage_start_step": self._stage_start_step,
             },
             path,
         )
@@ -171,10 +276,18 @@ class Trainer:
 
     def load_checkpoint(self, path: str | Path) -> int:
         """Load checkpoint and return the step it was saved at."""
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self.step = ckpt["step"]
+        self.stage_idx = ckpt.get("stage_idx", 0)
+        self._stage_start_step = ckpt.get("stage_start_step", 0)
+        if self.config.stages:
+            steps_into_stage = self.step - self._stage_start_step
+            self._apply_stage(
+                self.config.stages[self.stage_idx],
+                steps_into_stage=steps_into_stage,
+            )
         return self.step
 
     # ── Periodic evaluation ───────────────────────────────────────────────────
