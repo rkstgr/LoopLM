@@ -50,3 +50,51 @@ Verification:
 |   3   |   0.2900   |
 |   4   |   0.3100   |
 
+**6.1 — CAPO task**
+
+uv run scripts/analyze.py capo --n-individuals 200 --train-exposures 20 --model-sizes micro --loop-counts 1 4 --batch-size 8 --seq-len 64
+Capo experiment
+  N individuals : 200
+  Exposures     : 20
+  Model sizes   : ['micro']
+  Loop counts   : [1, 4]
+  Device        : auto
+
+
+[capo] size=micro (3.2M)  loop=1  N=200  steps≈312
+    step    44/449  loss=8.2363
+    step    88/449  loss=3.6798
+    step   132/449  loss=2.7903
+    step   176/449  loss=1.8244
+    step   220/449  loss=1.3435
+    step   264/449  loss=1.1793
+    step   308/449  loss=1.0860
+    step   352/449  loss=1.0683
+    step   396/449  loss=1.0211
+    step   440/449  loss=1.0313
+  → bits/param=0.000  p1=20.185  p2=33.628
+
+[capo] size=micro (3.2M)  loop=4  N=200  steps≈312
+    step    44/449  loss=8.2052
+    step    88/449  loss=3.6916
+    step   132/449  loss=3.1650
+    step   176/449  loss=2.3041
+    step   220/449  loss=1.6212
+    step   264/449  loss=1.2890
+    step   308/449  loss=1.1576
+    step   352/449  loss=1.1125
+    step   396/449  loss=1.0594
+    step   440/449  loss=1.0482
+  → bits/param=0.000  p1=20.648  p2=34.545
+
+=================================================================
+                CAPO RESULTS — Knowledge Capacity                
+=================================================================
+  Size       Params  Loop        N   bits/param       p1       p2
+  -------------------------------------------------------------
+  micro       3.2M     1      200        0.000   20.185   33.628
+  micro       3.2M     4      200        0.000   20.648   34.545
+=================================================================
+Expected: bits/param ≈ 2.0 for both loop=1 and loop=4
+
+Results saved to runs/capo/capo_results.csv

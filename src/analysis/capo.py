@@ -332,6 +332,11 @@ def compute_capacity_ratio(
       attr_bits  = N · log₂(S0 · e^-p2)  clipped at 0
       R(F)       = (name_bits + attr_bits) / P
 
+    Each biography is prefixed with an EOS token to match the training
+    distribution (packed sequences separate biographies with EOS).  This
+    allows the model to use its learned start-of-biography cue and enables
+    evaluation of the very first biography token.
+
     Args:
         model:     trained LoopLM (switched to eval mode internally)
         generator: BioSGenerator with the N individuals used for training
@@ -345,38 +350,44 @@ def compute_capacity_ratio(
     model.eval()
     N = generator.n
     P = sum(p.numel() for p in model.parameters())
+    eos_id: int = getattr(tokenizer, "eos_token_id", None) or 0
 
     total_name_nll = 0.0
     total_attr_nll = 0.0
 
     for ind in generator.individuals:
         text, name_spans, attr_spans = generator.render(ind)
-        ids = tokenizer.encode(text, add_special_tokens=False)
-        if len(ids) < 2:
+        bio_ids = tokenizer.encode(text, add_special_tokens=False)
+        if len(bio_ids) < 1:
             continue
 
-        # input = ids[:-1], targets = ids[1:]
+        # Prepend EOS to match training distribution: biographies follow EOS
+        # in the packed training sequences.  This gives the model the same
+        # start-of-biography context cue it saw during training.
+        ids = [eos_id] + bio_ids
+
+        # input_ids = ids[:-1], targets = ids[1:] = bio_ids
         input_ids = torch.tensor([ids[:-1]], dtype=torch.long, device=device)
-        targets = torch.tensor(ids[1:], dtype=torch.long, device=device)  # (S,)
+        targets = torch.tensor(bio_ids, dtype=torch.long, device=device)  # (S,)
         S = len(targets)
 
         out = model(input_ids, num_steps=num_steps)
         logits = out.logits[-1].squeeze(0)  # (S, vocab)
         log_probs = F.log_softmax(logits, dim=-1)  # (S, vocab)
 
-        # Map character spans → original token indices (into ids, not ids[:-1])
+        # Map character spans → token indices into bio_ids (0-based)
         name_toks = _char_spans_to_token_indices(text, name_spans, tokenizer)
         attr_toks = _char_spans_to_token_indices(text, attr_spans, tokenizer)
 
         def _nll_sum(tok_indices: list[int]) -> float:
-            """Sum of NLL for predicting each token at index k in ids.
+            """Sum of NLL for predicting each bio token at index k.
 
-            The LM is trained to predict ids[k] using logits at position k-1
-            in the input sequence (ids[:-1]).  So we look at log_probs[k-1].
+            With EOS prepended: input_ids[k] = ids[k], so logits[k]
+            predicts targets[k] = bio_ids[k].  pred_pos = k.
             """
             total = 0.0
             for k in tok_indices:
-                pred_pos = k - 1   # position in input / logits / targets
+                pred_pos = k
                 if pred_pos < 0 or pred_pos >= S:
                     continue
                 total += -log_probs[pred_pos, targets[pred_pos]].item()
@@ -567,17 +578,26 @@ def run_capo_experiment(config: CapoConfig) -> list[CapoResult]:
         for loop_count in config.loop_counts:
             model_config = make_capo_model_config(size, loop_count)
             n_params = model_config.num_parameters()
+            max_bits_per_param = config.n_individuals * (LOG2_N0 + LOG2_S0) / n_params
             print(
                 f"\n[capo] size={size} ({n_params/1e6:.1f}M)  loop={loop_count}  "
                 f"N={config.n_individuals:,}  steps≈{_est_steps(config, generator, tokenizer):,}"
             )
+            if max_bits_per_param < 0.5:
+                min_n = int(0.5 * n_params / (LOG2_N0 + LOG2_S0)) + 1
+                print(
+                    f"  NOTE: max possible bits/param with N={config.n_individuals:,} is "
+                    f"{max_bits_per_param:.4f} (perfect memorization). "
+                    f"Use N≥{min_n:,} for ≥0.5 bits/param."
+                )
             result = run_capo_single(
                 generator, tokenizer, model_config, size, loop_count, config, device
             )
             results.append(result)
             print(
-                f"  → bits/param={result.bits_per_param:.3f}  "
-                f"p1={result.name_loss_nats:.3f}  p2={result.attr_loss_nats:.3f}"
+                f"  → bits/param={result.bits_per_param:.4f}  "
+                f"p1={result.name_loss_nats:.3f}  p2={result.attr_loss_nats:.3f}  "
+                f"(threshold: p1<{math.log(N0):.2f}, p2<{math.log(S0):.2f})"
             )
 
     return results
@@ -603,7 +623,7 @@ def print_capo_results(results: list[CapoResult]) -> None:
     for r in results:
         print(
             f"  {r.model_size:<8} {r.n_params/1e6:>6.1f}M {r.loop_count:>5} "
-            f"{r.n_individuals:>8,} {r.bits_per_param:>12.3f} "
+            f"{r.n_individuals:>8,} {r.bits_per_param:>12.4f} "
             f"{r.name_loss_nats:>8.3f} {r.attr_loss_nats:>8.3f}"
         )
     print("=" * 65)
