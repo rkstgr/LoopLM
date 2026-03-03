@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
-from src.training.objectives import compute_looplm_loss
+from src.training.objectives import compute_adaptive_gate_loss, compute_looplm_loss
 
 
 @dataclass
@@ -373,6 +373,231 @@ class Trainer:
             }
             for i, v in enumerate(per_step):
                 log_dict[f"loss_step_{i+1}"] = v.item()
+            wandb.log(log_dict, step=self.step)
+
+
+# ── Stage II: Gate fine-tuning ────────────────────────────────────────────────
+
+@dataclass
+class GateFinetuneConfig:
+    """Config for Stage II: fine-tune the exit gate with LM params frozen."""
+    lr: float = 3e-5
+    beta1: float = 0.9
+    beta2: float = 0.95
+    weight_decay: float = 0.1
+    grad_clip: float = 1.0
+
+    max_steps: int = 10_000
+    num_recurrent_steps: int = 4
+    k: float = 50.0        # sigmoid sharpness for ideal-continuation label
+    gamma: float = 0.005   # improvement threshold
+
+    log_every: int = 10
+    save_every: int = 1_000
+    checkpoint_dir: str = "checkpoints"
+    device: str = "auto"
+
+    use_wandb: bool = False
+    wandb_project: str = "looplm"
+    wandb_run_name: str | None = None
+
+
+class GateFinetuner:
+    """Stage II: fine-tune exit gate with LM parameters frozen.
+
+    Loads a pre-trained LoopLM checkpoint, freezes all LM parameters, then
+    trains only the exit gate using compute_adaptive_gate_loss.
+    """
+
+    def __init__(self, model_config: LoopLMConfig, config: GateFinetuneConfig):
+        self.model_config = model_config
+        self.config = config
+        self.device = _resolve_device(config.device)
+
+        self.model = LoopLM(model_config).to(self.device)
+        self._freeze_lm_params()
+
+        # Optimizer only over exit gate parameters
+        self.optimizer = torch.optim.AdamW(
+            self.model.exit_gate.parameters(),
+            lr=config.lr,
+            betas=(config.beta1, config.beta2),
+            weight_decay=config.weight_decay,
+        )
+        self.step = 0
+
+        if config.use_wandb:
+            import wandb
+            wandb.init(
+                project=config.wandb_project,
+                name=config.wandb_run_name,
+                config={
+                    "model": dataclasses.asdict(model_config),
+                    "gate_finetune": dataclasses.asdict(config),
+                },
+            )
+
+    def _freeze_lm_params(self) -> None:
+        """Freeze all parameters except the exit gate."""
+        for name, param in self.model.named_parameters():
+            if "exit_gate" not in name:
+                param.requires_grad_(False)
+
+    # ── Checkpointing ──────────────────────────────────────────────────────────
+
+    def load_checkpoint(self, path: str | Path) -> int:
+        """Load model weights from a Stage I (or gate) checkpoint."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        # Re-freeze after load_state_dict (doesn't touch requires_grad)
+        self._freeze_lm_params()
+        loaded_step = ckpt.get("step", 0)
+        print(f"Loaded checkpoint from step {loaded_step}: {path}")
+        return loaded_step
+
+    def save_checkpoint(self) -> Path:
+        ckpt_dir = Path(self.config.checkpoint_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        path = ckpt_dir / f"gate_step_{self.step:07d}.pt"
+        torch.save(
+            {
+                "step": self.step,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "model_config": dataclasses.asdict(self.model_config),
+                "gate_config": dataclasses.asdict(self.config),
+            },
+            path,
+        )
+        return path
+
+    # ── Core training step ─────────────────────────────────────────────────────
+
+    def train_step(self, token_ids: Tensor) -> dict:
+        if isinstance(token_ids, (list, tuple)):
+            token_ids = token_ids[0]
+        token_ids = token_ids.to(self.device)
+        x = token_ids[:, :-1]
+        targets = token_ids[:, 1:]
+
+        self.model.train()
+        out = self.model(x, num_steps=self.config.num_recurrent_steps)
+        loss, diag = compute_adaptive_gate_loss(
+            out.logits, out.exit_lambdas, targets,
+            k=self.config.k, gamma=self.config.gamma,
+        )
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(
+            self.model.exit_gate.parameters(), self.config.grad_clip
+        )
+        self.optimizer.step()
+        self.step += 1
+        return diag
+
+    # ── Evaluation ────────────────────────────────────────────────────────────
+
+    def eval_avg_exit_step(
+        self,
+        dataloader,
+        n_batches: int = 50,
+        q_thresholds: tuple[float, ...] = (0.5, 0.7, 0.9),
+    ) -> dict[str, float]:
+        """Compute average exit step at various Q-exit thresholds.
+
+        Returns a dict like {"avg_exit_q0.5": 1.3, "avg_exit_q0.9": 3.1}.
+        Lower is better — the gate sends more sequences to earlier exits.
+        """
+        from src.inference.early_exit import QExit, run_with_early_exit
+
+        self.model.eval()
+        results: dict[str, float] = {}
+
+        for q in q_thresholds:
+            total_exit_steps = 0.0
+            total_sequences = 0
+
+            data_iter = iter(dataloader)
+            for _ in range(n_batches):
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    break
+                if isinstance(batch, (list, tuple)):
+                    batch = batch[0]
+                batch = batch.to(self.device)
+                x = batch[:, :-1]
+                B = x.shape[0]
+
+                with torch.no_grad():
+                    result = run_with_early_exit(
+                        self.model, x, QExit(q),
+                        max_steps=self.config.num_recurrent_steps,
+                    )
+                total_exit_steps += result.exit_step * B
+                total_sequences += B
+
+            if total_sequences:
+                results[f"avg_exit_q{q}"] = total_exit_steps / total_sequences
+
+        self.model.train()
+        return results
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+
+    def train(self, dataloader, val_dataloader=None) -> None:
+        """Fine-tune the gate until max_steps, with optional before/after eval."""
+        if val_dataloader is not None:
+            print("=== Early exit efficiency BEFORE gate fine-tuning ===")
+            before = self.eval_avg_exit_step(val_dataloader)
+            for key, val in before.items():
+                print(f"  {key}: {val:.3f}")
+            print()
+
+        data_iter = _infinite(dataloader)
+        while self.step < self.config.max_steps:
+            batch = next(data_iter)
+            diag = self.train_step(batch)
+
+            if self.step % self.config.log_every == 0:
+                self._log(diag)
+
+            if self.step % self.config.save_every == 0:
+                self.save_checkpoint()
+
+        self.save_checkpoint()
+
+        if val_dataloader is not None:
+            print("\n=== Early exit efficiency AFTER gate fine-tuning ===")
+            after = self.eval_avg_exit_step(val_dataloader)
+            for key, val in after.items():
+                print(f"  {key}: {val:.3f}")
+            print()
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+
+    def _log(self, diag: dict) -> None:
+        bce_str = "  ".join(
+            f"t{i+2}:{v.item():.3f}" for i, v in enumerate(diag.get("per_step_bce", []))
+        )
+        w_str = "  ".join(
+            f"t{i+2}:{v:.3f}" for i, v in enumerate(diag.get("mean_w_per_step", []))
+        )
+        print(
+            f"gate step {self.step:6d} | "
+            f"loss {diag['loss'].item():.4f} | "
+            f"BCE: {bce_str} | "
+            f"w: {w_str}"
+        )
+
+        if self.config.use_wandb:
+            import wandb
+            log_dict = {"gate_loss": diag["loss"].item()}
+            for i, v in enumerate(diag.get("per_step_bce", [])):
+                log_dict[f"gate_bce_t{i+2}"] = v.item()
+            for i, v in enumerate(diag.get("mean_w_per_step", [])):
+                log_dict[f"gate_w_t{i+2}"] = v
             wandb.log(log_dict, step=self.step)
 
 

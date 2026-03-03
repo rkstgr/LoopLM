@@ -477,6 +477,11 @@ Extend src/training/trainer.py to support the multi-stage pipeline:
 - Support resuming from any stage checkpoint, changing recurrent steps and RoPE base mid-training.
 ```
 
+Manual test:
+```bash
+uv run scripts/train.py --stage1a-steps 8 --stage1b-steps 8 --batch-size 2 --seq-len 64 --log-every 1
+```
+
 **5.2 — Stage II gate fine-tuning**
 ```
 Add a gate_finetune mode to the trainer that:
