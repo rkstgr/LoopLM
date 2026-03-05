@@ -25,6 +25,7 @@ mkdir -p "$LOG_DIR" "$OUT_DIR"
 export HF_HOME="${PROJECT}/hf_cache"
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+export PYTHONUNBUFFERED=1
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 echo "==> Node: $(hostname)  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
@@ -38,7 +39,7 @@ uv run scripts/analyze.py capo \
     --loop-counts     1 4      \
     --batch-size      192      \
     --seq-len         512      \
-    --log-every       100      \
+    --log-every       20      \
     --device          auto     \
     --output-dir      "$OUT_DIR"
 
