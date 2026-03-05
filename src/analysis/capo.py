@@ -31,6 +31,7 @@ Implementation notes:
 
 import math
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -555,6 +556,8 @@ class CapoConfig:
     warmup_steps: int = 1_000       # paper: 1000-step warmup before cosine decay
     grad_clip: float = 1.0
 
+    log_every: int = 100            # print a progress line every N steps
+
     tokenizer_id: str = "HuggingFaceTB/SmolLM2-135M"
     device: str = "auto"
     seed: int = 42
@@ -625,6 +628,7 @@ def run_capo_single(
 
     model.train()
     data_iter = _infinite_iter(dataloader)
+    t_start = time.monotonic()
     for step in range(total_steps):
         tokens, bio_ids = next(data_iter)
         tokens = tokens.to(device)
@@ -647,8 +651,13 @@ def run_capo_single(
         optimizer.step()
         scheduler.step()
 
-        if (step + 1) % max(1, total_steps // 10) == 0:
-            print(f"    step {step+1:5d}/{total_steps}  loss={loss.item():.4f}")
+        if (step + 1) % config.log_every == 0 or step + 1 == total_steps:
+            elapsed = time.monotonic() - t_start
+            eta = elapsed / (step + 1) * (total_steps - step - 1)
+            print(
+                f"    step {step+1:5d}/{total_steps}  loss={loss.item():.4f}"
+                f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
+            )
 
     bits_per_param, p1, p2 = compute_capacity_ratio(
         model, generator, tokenizer, loop_count, device
@@ -737,6 +746,18 @@ def print_capo_results(results: list[CapoResult]) -> None:
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
+
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration in seconds as a compact human-readable string."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m{s:02d}s"
+
 
 def _resolve_device(device: str) -> torch.device:
     if device != "auto":

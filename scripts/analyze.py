@@ -34,7 +34,12 @@ def run_capo(args) -> None:
     import dataclasses
     import statistics
 
-    from src.analysis.capo import CapoConfig, CapoResult, print_capo_results, run_capo_experiment
+    from src.analysis.capo import (
+        CapoConfig,
+        CapoResult,
+        print_capo_results,
+        run_capo_experiment,
+    )
 
     print(f"Capo experiment")
     print(f"  N individuals : {args.n_individuals:,}")
@@ -58,6 +63,7 @@ def run_capo(args) -> None:
             batch_size=args.batch_size,
             seq_len=args.seq_len,
             warmup_steps=args.warmup_steps,
+            log_every=args.log_every,
             tokenizer_id=args.tokenizer_id,
             device=args.device,
             seed=seed,
@@ -76,19 +82,21 @@ def run_capo(args) -> None:
         print("=" * 75)
         # Group by (model_size, loop_count)
         n_runs = len(all_results[0])
-        print(f"  {'Size':<8} {'Params':>8} {'Loop':>5} {'N':>8} {'bits/param':>16} {'p1':>10} {'p2':>10}")
+        print(
+            f"  {'Size':<8} {'Params':>8} {'Loop':>5} {'N':>8} {'bits/param':>16} {'p1':>10} {'p2':>10}"
+        )
         print("  " + "-" * 67)
         for i in range(n_runs):
             r0 = all_results[0][i]
             bpp_vals = [all_results[s][i].bits_per_param for s in range(args.num_seeds)]
-            p1_vals  = [all_results[s][i].name_loss_nats for s in range(args.num_seeds)]
-            p2_vals  = [all_results[s][i].attr_loss_nats for s in range(args.num_seeds)]
+            p1_vals = [all_results[s][i].name_loss_nats for s in range(args.num_seeds)]
+            p2_vals = [all_results[s][i].attr_loss_nats for s in range(args.num_seeds)]
             bpp_mean = statistics.mean(bpp_vals)
-            bpp_std  = statistics.stdev(bpp_vals) if args.num_seeds > 1 else 0.0
-            p1_mean  = statistics.mean(p1_vals)
-            p2_mean  = statistics.mean(p2_vals)
+            bpp_std = statistics.stdev(bpp_vals) if args.num_seeds > 1 else 0.0
+            p1_mean = statistics.mean(p1_vals)
+            p2_mean = statistics.mean(p2_vals)
             print(
-                f"  {r0.model_size:<8} {r0.n_params/1e6:>6.1f}M {r0.loop_count:>5} "
+                f"  {r0.model_size:<8} {r0.n_params / 1e6:>6.1f}M {r0.loop_count:>5} "
                 f"{r0.n_individuals:>8,} {bpp_mean:>8.4f}±{bpp_std:.4f} "
                 f"{p1_mean:>10.3f} {p2_mean:>10.3f}"
             )
@@ -139,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     capo.add_argument(
         "--model-sizes",
         nargs="+",
-        default=["micro", "mini"],
+        default=["micro"],
         choices=["micro", "mini", "small", "medium"],
         help="Model size presets to benchmark",
     )
@@ -161,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     capo.add_argument("--batch-size", type=int, default=192)
     capo.add_argument("--seq-len", type=int, default=512)
     capo.add_argument("--warmup-steps", type=int, default=1_000)
+    capo.add_argument("--log-every", type=int, default=100, help="Print progress every N steps")
     capo.add_argument("--tokenizer-id", default="HuggingFaceTB/SmolLM2-135M")
     capo.add_argument("--device", default="auto")
     capo.add_argument("--seed", type=int, default=42)
