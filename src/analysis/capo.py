@@ -600,12 +600,20 @@ def run_capo_single(
     P = sum(p.numel() for p in model.parameters())
 
     dataset = BioSTrainDataset(generator, tokenizer, seq_len=config.seq_len)
+
+    # Scale batch size down proportionally to loop count: each recurrent step
+    # retains its own activations for backprop, so peak memory grows linearly
+    # with loop_count.  Dividing by loop_count keeps activation memory constant.
+    batch_size = max(1, config.batch_size // loop_count)
+    if batch_size < config.batch_size:
+        print(f"    batch_size scaled {config.batch_size} → {batch_size} for loop={loop_count}")
+
     # total_tokens across all exposures
     total_tokens = len(dataset) * (config.seq_len + 1) * config.train_exposures
-    total_steps = max(1, total_tokens // (config.batch_size * config.seq_len))
+    total_steps = max(1, total_tokens // (batch_size * config.seq_len))
 
     dataloader = DataLoader(
-        dataset, batch_size=config.batch_size, shuffle=True, drop_last=True
+        dataset, batch_size=batch_size, shuffle=True, drop_last=True
     )
 
     optimizer = torch.optim.AdamW(
