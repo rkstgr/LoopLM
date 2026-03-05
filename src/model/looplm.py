@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -9,8 +9,7 @@ from src.model.rope import RotaryEmbedding
 from src.model.transformer import RMSNorm, TransformerBlock
 
 
-@dataclass
-class LoopLMOutput:
+class LoopLMOutput(NamedTuple):
     # One tensor per recurrent step
     logits: list[Tensor]       # each (B, S, vocab_size)
     exit_lambdas: list[Tensor] # each (B, S) — raw sigmoid gate outputs λ_t

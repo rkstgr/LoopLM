@@ -612,15 +612,8 @@ def run_capo_single(
 
     dataset = BioSTrainDataset(generator, tokenizer, seq_len=config.seq_len)
 
-    # Scale batch size down proportionally to loop count: each recurrent step
-    # retains its own activations for backprop, so peak memory grows linearly
-    # with loop_count.  Dividing by loop_count keeps activation memory constant.
-    # Scale LR up by the same factor (linear scaling rule) so the effective
-    # gradient signal per update is equivalent across loop counts.
-    # With DataParallel the per-GPU batch is batch_size/n_gpus, so scale the
-    # total batch size up by n_gpus to keep per-GPU load constant.
-    batch_size = max(n_gpus, (config.batch_size // loop_count) * n_gpus)
-    lr = config.lr * (batch_size / config.batch_size)  # linear LR scaling
+    batch_size = config.batch_size
+    lr = config.lr
     print(
         f"    batch_size={batch_size}  lr={lr:.2e}"
         f"  (loop={loop_count}, n_gpus={n_gpus})"
