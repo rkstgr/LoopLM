@@ -36,7 +36,7 @@ uv run scripts/analyze.py capo \
     --n-individuals   85000    \
     --train-exposures 1000     \
     --model-sizes     micro    \
-    --loop-counts     1 4      \
+    --loop-counts     1      \
     --batch-size      192      \
     --seq-len         512      \
     --log-every       20      \

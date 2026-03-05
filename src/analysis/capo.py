@@ -43,7 +43,6 @@ from torch.utils.data import DataLoader, Dataset
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 
-
 # ── Paper constants (Appendix B.1) ────────────────────────────────────────────
 
 # Name pool: N0 = N_FIRST * N_MIDDLE * N_LAST = 400 * 1000 * 400 = 160M
@@ -56,7 +55,7 @@ N0: int = N_FIRST_NAMES * N_MIDDLE_NAMES * N_LAST_NAMES  # 160_000_000
 N_GENDERS: int = 2
 N_BIRTH_MONTHS: int = 12
 N_BIRTH_DAYS: int = 28
-N_BIRTH_YEARS: int = 200        # 1800–1999
+N_BIRTH_YEARS: int = 200  # 1800–1999
 N_UNIVERSITIES: int = 200
 N_MAJORS: int = 300
 N_HOMETOWNS: int = 100
@@ -69,12 +68,22 @@ S0: int = (
     * N_HOMETOWNS
     * N_EMPLOYERS
 )
-LOG2_N0: float = math.log2(N0)   # ≈ 27.25 bits
-LOG2_S0: float = math.log2(S0)   # ≈ 47.59 bits
+LOG2_N0: float = math.log2(N0)  # ≈ 27.25 bits
+LOG2_S0: float = math.log2(S0)  # ≈ 47.59 bits
 
 _MONTH_NAMES = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ]
 
 # Gender-neutral pronoun per paper (Appendix B.1 example uses "they/their").
@@ -161,6 +170,7 @@ def _get_emp_pool() -> list[str]:
 
 # ── Individual dataclass ───────────────────────────────────────────────────────
 
+
 @dataclass
 class Individual:
     """One person in the bioS(N) dataset.
@@ -170,15 +180,16 @@ class Individual:
     Gender is stored for S0 information-theoretic accounting but is NOT
     expressed in the biography text (we use gender-neutral "They").
     """
+
     # Name (p1)
     first_name: str
     middle_name: str
     last_name: str
     # Attributes (p2)
-    gender: str        # "male" | "female" — kept for S0 accounting, not in text
-    birth_month: int   # 1–12
-    birth_day: int     # 1–28
-    birth_year: str    # "1800" .. "1999"
+    gender: str  # "male" | "female" — kept for S0 accounting, not in text
+    birth_month: int  # 1–12
+    birth_day: int  # 1–28
+    birth_year: str  # "1800" .. "1999"
     university: str
     major: str
     hometown: str
@@ -190,6 +201,7 @@ class Individual:
 
 
 # ── BioS generator ────────────────────────────────────────────────────────────
+
 
 class BioSGenerator:
     """Generates the bioS(N) synthetic biography dataset.
@@ -236,19 +248,21 @@ class BioSGenerator:
             if key in seen:
                 continue
             seen.add(key)
-            result.append(Individual(
-                first_name=first,
-                middle_name=middle,
-                last_name=last,
-                gender=rng.choice(["male", "female"]),
-                birth_month=rng.randint(1, N_BIRTH_MONTHS),
-                birth_day=rng.randint(1, N_BIRTH_DAYS),
-                birth_year=rng.choice(years),
-                university=rng.choice(univs),
-                major=rng.choice(majors),
-                hometown=rng.choice(towns),
-                employer=rng.choice(emps),
-            ))
+            result.append(
+                Individual(
+                    first_name=first,
+                    middle_name=middle,
+                    last_name=last,
+                    gender=rng.choice(["male", "female"]),
+                    birth_month=rng.randint(1, N_BIRTH_MONTHS),
+                    birth_day=rng.randint(1, N_BIRTH_DAYS),
+                    birth_year=rng.choice(years),
+                    university=rng.choice(univs),
+                    major=rng.choice(majors),
+                    hometown=rng.choice(towns),
+                    employer=rng.choice(emps),
+                )
+            )
         return result
 
     # ── Text rendering ─────────────────────────────────────────────────────────
@@ -313,6 +327,7 @@ class BioSGenerator:
 
 # ── Dataset for LM training ────────────────────────────────────────────────────
 
+
 class BioSTrainDataset(Dataset):
     """Packs all biographies into fixed-length windows for language-model training.
 
@@ -355,6 +370,7 @@ class BioSTrainDataset(Dataset):
 
 # ── Block-causal attention mask ────────────────────────────────────────────────
 
+
 def _build_block_causal_mask(bio_ids: Tensor) -> Tensor:
     """Build an additive attention mask that enforces block-causal structure.
 
@@ -387,6 +403,7 @@ def _build_block_causal_mask(bio_ids: Tensor) -> Tensor:
 
 # ── Token-span helpers ─────────────────────────────────────────────────────────
 
+
 def _char_spans_to_token_indices(
     text: str,
     char_spans: list[tuple[int, int]],
@@ -414,6 +431,7 @@ def _char_spans_to_token_indices(
 
 
 # ── Capacity ratio computation ─────────────────────────────────────────────────
+
 
 @torch.no_grad()
 def compute_capacity_ratio(
@@ -479,9 +497,10 @@ def compute_capacity_ratio(
         targets = torch.tensor(bio_ids, dtype=torch.long, device=device)  # (S,)
         S = len(targets)
 
-        out = model(input_ids, num_steps=num_steps)
-        logits = out.logits[-1].squeeze(0)  # (S, vocab)
-        log_probs = F.log_softmax(logits, dim=-1)  # (S, vocab)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = model(input_ids, num_steps=num_steps)
+            logits = out.logits[-1].squeeze(0)  # (S, vocab)
+            log_probs = F.log_softmax(logits.float(), dim=-1)  # (S, vocab)
 
         # Map character spans → token indices into bio_ids (0-based)
         name_toks = _char_spans_to_token_indices(text, name_spans, tokenizer)
@@ -516,9 +535,9 @@ _MODEL_SIZES: dict[str, dict] = {
     # name → (hidden_size, num_layers, num_heads, intermediate_size)
     # Param counts include embedding (vocab 49152 × hidden).
     # Approximate totals: micro ~3M, mini ~7M, small ~15M, medium ~35M
-    "micro":  dict(hidden_size=64,  num_layers=2, num_heads=1, intermediate_size=128),
-    "mini":   dict(hidden_size=128, num_layers=2, num_heads=2, intermediate_size=256),
-    "small":  dict(hidden_size=256, num_layers=4, num_heads=4, intermediate_size=512),
+    "micro": dict(hidden_size=64, num_layers=2, num_heads=1, intermediate_size=128),
+    "mini": dict(hidden_size=128, num_layers=2, num_heads=2, intermediate_size=256),
+    "small": dict(hidden_size=256, num_layers=4, num_heads=4, intermediate_size=512),
     "medium": dict(hidden_size=512, num_layers=4, num_heads=8, intermediate_size=1024),
 }
 
@@ -541,11 +560,13 @@ def make_capo_model_config(size: str, loop_count: int) -> LoopLMConfig:
 
 # ── Experiment config & result ─────────────────────────────────────────────────
 
+
 @dataclass
 class CapoConfig:
     """Configuration for the Capo (knowledge capacity) experiment."""
+
     n_individuals: int = 20_000
-    train_exposures: int = 1_000      # paper: 1000 exposures
+    train_exposures: int = 1_000  # paper: 1000 exposures
     model_sizes: list[str] = field(default_factory=lambda: ["micro", "mini"])
     loop_counts: list[int] = field(default_factory=lambda: [1, 4])
 
@@ -556,10 +577,10 @@ class CapoConfig:
     weight_decay: float = 0.02
     batch_size: int = 192
     seq_len: int = 512
-    warmup_steps: int = 1_000       # paper: 1000-step warmup before cosine decay
+    warmup_steps: int = 1_000  # paper: 1000-step warmup before cosine decay
     grad_clip: float = 1.0
 
-    log_every: int = 100            # print a progress line every N steps
+    log_every: int = 100  # print a progress line every N steps
 
     tokenizer_id: str = "HuggingFaceTB/SmolLM2-135M"
     device: str = "auto"
@@ -574,11 +595,12 @@ class CapoResult:
     loop_count: int
     n_individuals: int
     bits_per_param: float
-    name_loss_nats: float   # p1: per-individual average name CE
-    attr_loss_nats: float   # p2: per-individual average attribute CE
+    name_loss_nats: float  # p1: per-individual average name CE
+    attr_loss_nats: float  # p2: per-individual average attribute CE
 
 
 # ── Single-run training ────────────────────────────────────────────────────────
+
 
 def run_capo_single(
     generator: BioSGenerator,
@@ -645,9 +667,17 @@ def run_capo_single(
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
 
+    from src.training.objectives import compute_looplm_loss
+
     model.train()
     data_iter = _infinite_iter(dataloader)
     t_start = time.monotonic()
+
+    # Paper uses bf16 training (Appendix B.1)
+    # H100s/A100s provide the best performance with bfloat16.
+    # Autocast handles the mixed-precision scaling for logits and activations.
+    scaler = torch.GradScaler(enabled=False)  # Not needed for bf16 usually
+
     for step in range(total_steps):
         tokens, bio_ids = next(data_iter)
         tokens = tokens.to(device)
@@ -659,10 +689,17 @@ def run_capo_single(
         # Block-causal mask: prevent cross-biography attention
         attn_mask = _build_block_causal_mask(bio_ids_x)
 
-        out = model(x, num_steps=loop_count, attention_mask=attn_mask)
-        logits = out.logits[-1]   # final-step logits
-        B, S, V = logits.shape
-        loss = F.cross_entropy(logits.reshape(B * S, V), tgt.reshape(B * S))
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            out = model(x, num_steps=loop_count, attention_mask=attn_mask)
+
+            # LoopLM Stage I multi-step loss: Σ p(t|x) * L(t)
+            # This is the standard training objective for LoopLMs (Paper Eq. 4).
+            loss, diags = compute_looplm_loss(
+                logits_per_step=out.logits,
+                exit_lambdas=out.exit_lambdas,
+                targets=tgt,
+                beta=0.1,  # Stage I entropy weight
+            )
 
         optimizer.zero_grad()
         loss.backward()
@@ -674,7 +711,7 @@ def run_capo_single(
             elapsed = time.monotonic() - t_start
             eta = elapsed / (step + 1) * (total_steps - step - 1)
             print(
-                f"    step {step+1:5d}/{total_steps}  loss={loss.item():.4f}"
+                f"    step {step + 1:5d}/{total_steps}  loss={loss.item():.4f}"
                 f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
             )
 
@@ -693,6 +730,7 @@ def run_capo_single(
 
 
 # ── Full experiment ────────────────────────────────────────────────────────────
+
 
 def run_capo_experiment(config: CapoConfig) -> list[CapoResult]:
     """Run the full Capo experiment across all (model_size, loop_count) pairs.
@@ -715,7 +753,7 @@ def run_capo_experiment(config: CapoConfig) -> list[CapoResult]:
             # N needed to saturate this model at ~2 bits/param (paper target)
             n_for_2bpp = int(2.0 * n_params / (LOG2_N0 + LOG2_S0)) + 1
             print(
-                f"\n[capo] size={size} ({n_params/1e6:.1f}M)  loop={loop_count}  "
+                f"\n[capo] size={size} ({n_params / 1e6:.1f}M)  loop={loop_count}  "
                 f"N={config.n_individuals:,}  steps≈{_est_steps(config, generator, tokenizer):,}"
             )
             print(
@@ -745,16 +783,19 @@ def _est_steps(config: CapoConfig, generator: BioSGenerator, tokenizer) -> int:
 
 # ── Output helpers ────────────────────────────────────────────────────────────
 
+
 def print_capo_results(results: list[CapoResult]) -> None:
     """Print a formatted table of Capo experiment results."""
     print("\n" + "=" * 65)
     print(f"{'CAPO RESULTS — Knowledge Capacity':^65}")
     print("=" * 65)
-    print(f"  {'Size':<8} {'Params':>8} {'Loop':>5} {'N':>8} {'bits/param':>12} {'p1':>8} {'p2':>8}")
+    print(
+        f"  {'Size':<8} {'Params':>8} {'Loop':>5} {'N':>8} {'bits/param':>12} {'p1':>8} {'p2':>8}"
+    )
     print("  " + "-" * 61)
     for r in results:
         print(
-            f"  {r.model_size:<8} {r.n_params/1e6:>6.1f}M {r.loop_count:>5} "
+            f"  {r.model_size:<8} {r.n_params / 1e6:>6.1f}M {r.loop_count:>5} "
             f"{r.n_individuals:>8,} {r.bits_per_param:>12.4f} "
             f"{r.name_loss_nats:>8.3f} {r.attr_loss_nats:>8.3f}"
         )
@@ -764,6 +805,7 @@ def print_capo_results(results: list[CapoResult]) -> None:
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
+
 
 def _fmt_duration(seconds: float) -> str:
     """Format a duration in seconds as a compact human-readable string."""
