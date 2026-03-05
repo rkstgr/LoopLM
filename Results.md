@@ -52,49 +52,26 @@ Verification:
 
 **6.1 — CAPO task**
 
-uv run scripts/analyze.py capo --n-individuals 200 --train-exposures 20 --model-sizes micro --loop-counts 1 4 --batch-size 8 --seq-len 64
+srun uv run scripts/analyze.py capo --n-individuals 20000 --train-exposures 500 --model-sizes micro --loop-counts 1 4
 Capo experiment
-  N individuals : 200
-  Exposures     : 20
+  N individuals : 20,000
+  Exposures     : 500
   Model sizes   : ['micro']
   Loop counts   : [1, 4]
   Device        : auto
 
 
-[capo] size=micro (3.2M)  loop=1  N=200  steps≈312
-    step    44/449  loss=8.2363
-    step    88/449  loss=3.6798
-    step   132/449  loss=2.7903
-    step   176/449  loss=1.8244
-    step   220/449  loss=1.3435
-    step   264/449  loss=1.1793
-    step   308/449  loss=1.0860
-    step   352/449  loss=1.0683
-    step   396/449  loss=1.0211
-    step   440/449  loss=1.0313
-  → bits/param=0.000  p1=20.185  p2=33.628
+[capo] size=micro (3.2M)  loop=1  N=20,000  steps≈4,069
+    step   586/5865  loss=0.9350
+    step  1172/5865  loss=0.9074
+    step  1758/5865  loss=0.9059
+    step  2344/5865  loss=0.9027
+    step  2930/5865  loss=0.8978
+    step  3516/5865  loss=0.8950
+    step  4102/5865  loss=0.8905
+    step  4688/5865  loss=0.8844
+    step  5274/5865  loss=0.8826
+    step  5860/5865  loss=0.8817
+  → bits/param=0.006  p1=20.370  p2=32.266
 
-[capo] size=micro (3.2M)  loop=4  N=200  steps≈312
-    step    44/449  loss=8.2052
-    step    88/449  loss=3.6916
-    step   132/449  loss=3.1650
-    step   176/449  loss=2.3041
-    step   220/449  loss=1.6212
-    step   264/449  loss=1.2890
-    step   308/449  loss=1.1576
-    step   352/449  loss=1.1125
-    step   396/449  loss=1.0594
-    step   440/449  loss=1.0482
-  → bits/param=0.000  p1=20.648  p2=34.545
-
-=================================================================
-                CAPO RESULTS — Knowledge Capacity                
-=================================================================
-  Size       Params  Loop        N   bits/param       p1       p2
-  -------------------------------------------------------------
-  micro       3.2M     1      200        0.000   20.185   33.628
-  micro       3.2M     4      200        0.000   20.648   34.545
-=================================================================
-Expected: bits/param ≈ 2.0 for both loop=1 and loop=4
-
-Results saved to runs/capo/capo_results.csv
+[capo] size=micro (3.2M)  loop=4  N=20,000  steps≈4,069

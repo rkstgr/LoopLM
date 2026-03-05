@@ -9,7 +9,7 @@ Subcommands:
 Usage:
     # Quick smoke test (tiny N, few exposures)
     uv run scripts/analyze.py capo \
-        --n-individuals 200 --train-exposures 5 \
+        --n-individuals 200 --train-exposures 1000 \
         --model-sizes micro --loop-counts 1 4 \
         --batch-size 8 --seq-len 64
 
@@ -28,8 +28,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ── Capo subcommand ───────────────────────────────────────────────────────────
 
+
 def run_capo(args) -> None:
-    from src.analysis.capo import CapoConfig, run_capo_experiment, print_capo_results
+    from src.analysis.capo import CapoConfig, print_capo_results, run_capo_experiment
 
     config = CapoConfig(
         n_individuals=args.n_individuals,
@@ -73,6 +74,7 @@ def run_capo(args) -> None:
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="LoopLM analysis experiments",
@@ -83,15 +85,32 @@ def build_parser() -> argparse.ArgumentParser:
     # ── capo ──────────────────────────────────────────────────────────────────
     capo = sub.add_parser("capo", help="Knowledge capacity experiment (Section 6.1)")
 
-    capo.add_argument("--n-individuals", type=int, default=10_000,
-                      help="Number of synthetic individuals in the biography dataset")
-    capo.add_argument("--train-exposures", type=int, default=100,
-                      help="Times each biography is seen during training (paper: 1000)")
-    capo.add_argument("--model-sizes", nargs="+", default=["micro", "mini"],
-                      choices=["micro", "mini", "small", "medium"],
-                      help="Model size presets to benchmark")
-    capo.add_argument("--loop-counts", nargs="+", type=int, default=[1, 4],
-                      help="Recurrent step counts to compare")
+    capo.add_argument(
+        "--n-individuals",
+        type=int,
+        default=10_000,
+        help="Number of synthetic individuals in the biography dataset",
+    )
+    capo.add_argument(
+        "--train-exposures",
+        type=int,
+        default=100,
+        help="Times each biography is seen during training (paper: 1000)",
+    )
+    capo.add_argument(
+        "--model-sizes",
+        nargs="+",
+        default=["micro", "mini"],
+        choices=["micro", "mini", "small", "medium"],
+        help="Model size presets to benchmark",
+    )
+    capo.add_argument(
+        "--loop-counts",
+        nargs="+",
+        type=int,
+        default=[1, 4],
+        help="Recurrent step counts to compare",
+    )
 
     capo.add_argument("--lr", type=float, default=1e-3)
     capo.add_argument("--batch-size", type=int, default=192)
