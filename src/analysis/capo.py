@@ -604,9 +604,15 @@ def run_capo_single(
     # Scale batch size down proportionally to loop count: each recurrent step
     # retains its own activations for backprop, so peak memory grows linearly
     # with loop_count.  Dividing by loop_count keeps activation memory constant.
+    # Scale LR up by the same factor (linear scaling rule) so the effective
+    # gradient signal per update is equivalent across loop counts.
     batch_size = max(1, config.batch_size // loop_count)
+    lr = config.lr * (config.batch_size / batch_size)  # linear LR scaling
     if batch_size < config.batch_size:
-        print(f"    batch_size scaled {config.batch_size} → {batch_size} for loop={loop_count}")
+        print(
+            f"    batch_size scaled {config.batch_size} → {batch_size},"
+            f" lr scaled {config.lr:.2e} → {lr:.2e}  (loop={loop_count})"
+        )
 
     # total_tokens across all exposures
     total_tokens = len(dataset) * (config.seq_len + 1) * config.train_exposures
@@ -618,7 +624,7 @@ def run_capo_single(
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config.lr,
+        lr=lr,
         betas=(0.9, config.beta2),
         eps=config.eps,
         weight_decay=config.weight_decay,
@@ -701,17 +707,16 @@ def run_capo_experiment(config: CapoConfig) -> list[CapoResult]:
             model_config = make_capo_model_config(size, loop_count)
             n_params = model_config.num_parameters()
             max_bits_per_param = config.n_individuals * (LOG2_N0 + LOG2_S0) / n_params
+            # N needed to saturate this model at ~2 bits/param (paper target)
+            n_for_2bpp = int(2.0 * n_params / (LOG2_N0 + LOG2_S0)) + 1
             print(
                 f"\n[capo] size={size} ({n_params/1e6:.1f}M)  loop={loop_count}  "
                 f"N={config.n_individuals:,}  steps≈{_est_steps(config, generator, tokenizer):,}"
             )
-            if max_bits_per_param < 0.5:
-                min_n = int(0.5 * n_params / (LOG2_N0 + LOG2_S0)) + 1
-                print(
-                    f"  NOTE: max possible bits/param with N={config.n_individuals:,} is "
-                    f"{max_bits_per_param:.4f} (perfect memorization). "
-                    f"Use N≥{min_n:,} for ≥0.5 bits/param."
-                )
+            print(
+                f"  capacity ceiling: {max_bits_per_param:.3f} bits/param  "
+                f"(paper target: ~2.0;  need N≥{n_for_2bpp:,} to saturate this model)"
+            )
             result = run_capo_single(
                 generator, tokenizer, model_config, size, loop_count, config, device
             )
