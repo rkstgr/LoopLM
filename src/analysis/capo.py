@@ -454,6 +454,9 @@ def compute_capacity_ratio(
     Returns:
         (bits_per_param, p1, p2) — capacity ratio plus raw losses for diagnostics
     """
+    # Unwrap DataParallel so we can call model() with a plain interface
+    if isinstance(model, torch.nn.DataParallel):
+        model = model.module
     model.eval()
     N = generator.n
     P = sum(p.numel() for p in model.parameters())
@@ -599,6 +602,14 @@ def run_capo_single(
     model = LoopLM(model_config).to(device)
     P = sum(p.numel() for p in model.parameters())
 
+    # Multi-GPU data parallelism: wrap with DataParallel when multiple GPUs are
+    # visible and the device is CUDA.  Scale batch size up by n_gpus so each
+    # GPU still processes the same per-GPU batch size.
+    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
+    if n_gpus > 1:
+        model = torch.nn.DataParallel(model)
+        print(f"    DataParallel: using {n_gpus} GPUs")
+
     dataset = BioSTrainDataset(generator, tokenizer, seq_len=config.seq_len)
 
     # Scale batch size down proportionally to loop count: each recurrent step
@@ -606,13 +617,14 @@ def run_capo_single(
     # with loop_count.  Dividing by loop_count keeps activation memory constant.
     # Scale LR up by the same factor (linear scaling rule) so the effective
     # gradient signal per update is equivalent across loop counts.
-    batch_size = max(1, config.batch_size // loop_count)
-    lr = config.lr * (config.batch_size / batch_size)  # linear LR scaling
-    if batch_size < config.batch_size:
-        print(
-            f"    batch_size scaled {config.batch_size} → {batch_size},"
-            f" lr scaled {config.lr:.2e} → {lr:.2e}  (loop={loop_count})"
-        )
+    # With DataParallel the per-GPU batch is batch_size/n_gpus, so scale the
+    # total batch size up by n_gpus to keep per-GPU load constant.
+    batch_size = max(n_gpus, (config.batch_size // loop_count) * n_gpus)
+    lr = config.lr * (batch_size / config.batch_size)  # linear LR scaling
+    print(
+        f"    batch_size={batch_size}  lr={lr:.2e}"
+        f"  (loop={loop_count}, n_gpus={n_gpus})"
+    )
 
     # total_tokens across all exposures
     total_tokens = len(dataset) * (config.seq_len + 1) * config.train_exposures

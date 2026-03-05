@@ -3,8 +3,8 @@
 #SBATCH --partition=dc-hwai
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
 #SBATCH --time=04:00:00
 #SBATCH --job-name=looplm_capo
 #SBATCH --output=/p/scratch/westai0047/looplm/logs/%x_%j.out
