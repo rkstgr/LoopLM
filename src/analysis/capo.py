@@ -576,6 +576,7 @@ class CapoConfig:
     eps: float = 1e-6
     weight_decay: float = 0.02
     batch_size: int = 192
+    accumulation_steps: int = 1
     seq_len: int = 512
     warmup_steps: int = 1_000  # paper: 1000-step warmup before cosine decay
     grad_clip: float = 1.0
@@ -634,35 +635,41 @@ def run_capo_single(
 
     dataset = BioSTrainDataset(generator, tokenizer, seq_len=config.seq_len)
 
-    batch_size = config.batch_size
-    lr = config.lr
+    # Target batch size from paper is 192.
+    # We use a smaller micro-batch size to fit in memory and accumulate.
+    micro_batch_size = config.batch_size
+    accumulation_steps = config.accumulation_steps
+    effective_batch_size = micro_batch_size * accumulation_steps
+
     print(
-        f"    batch_size={batch_size}  lr={lr:.2e}"
-        f"  (loop={loop_count}, n_gpus={n_gpus})"
+        f"    micro_batch_size={micro_batch_size}  accumulation_steps={accumulation_steps}"
+        f"  effective_batch_size={effective_batch_size}  lr={config.lr:.2e}"
     )
 
     # total_tokens across all exposures
     total_tokens = len(dataset) * (config.seq_len + 1) * config.train_exposures
-    total_steps = max(1, total_tokens // (batch_size * config.seq_len))
+    # total_updates is the number of optimizer steps
+    total_updates = max(1, total_tokens // (effective_batch_size * config.seq_len))
+    total_steps = total_updates * accumulation_steps
 
     dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=True, drop_last=True
+        dataset, batch_size=micro_batch_size, shuffle=True, drop_last=True
     )
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=lr,
+        lr=config.lr,
         betas=(0.9, config.beta2),
         eps=config.eps,
         weight_decay=config.weight_decay,
     )
 
-    warmup = min(config.warmup_steps, total_steps // 10)
+    warmup = min(config.warmup_steps, total_updates // 10)
 
-    def _lr_lambda(step: int) -> float:
-        if step < warmup:
-            return step / max(1, warmup)
-        progress = (step - warmup) / max(1, total_steps - warmup)
+    def _lr_lambda(update: int) -> float:
+        if update < warmup:
+            return update / max(1, warmup)
+        progress = (update - warmup) / max(1, total_updates - warmup)
         return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
@@ -678,6 +685,7 @@ def run_capo_single(
     # Autocast handles the mixed-precision scaling for logits and activations.
     scaler = torch.GradScaler(enabled=False)  # Not needed for bf16 usually
 
+    optimizer.zero_grad()
     for step in range(total_steps):
         tokens, bio_ids = next(data_iter)
         tokens = tokens.to(device)
@@ -700,18 +708,25 @@ def run_capo_single(
                 targets=tgt,
                 beta=0.1,  # Stage I entropy weight
             )
+            # Normalize loss for accumulation
+            loss = loss / accumulation_steps
 
-        optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-        optimizer.step()
-        scheduler.step()
 
-        if (step + 1) % config.log_every == 0 or step + 1 == total_steps:
+        if (step + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
+
+        if (step + 1) % (
+            config.log_every * accumulation_steps
+        ) == 0 or step + 1 == total_steps:
             elapsed = time.monotonic() - t_start
+            current_update = (step + 1) // accumulation_steps
             eta = elapsed / (step + 1) * (total_steps - step - 1)
             print(
-                f"    step {step + 1:5d}/{total_steps}  loss={loss.item():.4f}"
+                f"    update {current_update:5d}/{total_updates}  loss={loss.item() * accumulation_steps:.4f}"
                 f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
             )
 

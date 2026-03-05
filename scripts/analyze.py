@@ -46,6 +46,7 @@ def run_capo(args) -> None:
     print(f"  Exposures     : {args.train_exposures}")
     print(f"  Model sizes   : {args.model_sizes}")
     print(f"  Loop counts   : {args.loop_counts}")
+    print(f"  Accumulation  : {args.accumulation_steps}")
     print(f"  Seeds         : {args.num_seeds}")
     print(f"  Device        : {args.device}")
     print()
@@ -61,6 +62,7 @@ def run_capo(args) -> None:
             loop_counts=args.loop_counts,
             lr=args.lr,
             batch_size=args.batch_size,
+            accumulation_steps=args.accumulation_steps,
             seq_len=args.seq_len,
             warmup_steps=args.warmup_steps,
             log_every=args.log_every,
@@ -166,7 +168,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     capo.add_argument("--lr", type=float, default=1e-3)
-    capo.add_argument("--batch-size", type=int, default=192)
+    capo.add_argument("--batch-size", type=int, default=192, help="Micro-batch size per forward pass")
+    capo.add_argument("--accumulation-steps", type=int, default=1, help="Number of steps to accumulate gradients")
     capo.add_argument("--seq-len", type=int, default=512)
     capo.add_argument("--warmup-steps", type=int, default=1_000)
     capo.add_argument("--log-every", type=int, default=100, help="Print progress every N steps")
