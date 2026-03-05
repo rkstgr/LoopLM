@@ -1,0 +1,206 @@
+Harvard University
+Yale University
+Princeton University
+Columbia University
+Massachusetts Institute of Technology
+Stanford University
+California Institute of Technology
+Cornell University
+University of Pennsylvania
+Dartmouth College
+Brown University
+Duke University
+Vanderbilt University
+Rice University
+University of Notre Dame
+Georgetown University
+Emory University
+Tulane University
+Tufts University
+Wake Forest University
+Brandeis University
+Case Western Reserve University
+Northwestern University
+University of Chicago
+Johns Hopkins University
+Carnegie Mellon University
+Purdue University
+University of Michigan
+University of Virginia
+University of North Carolina
+Georgia Institute of Technology
+University of California Los Angeles
+University of Southern California
+University of California Berkeley
+University of California San Diego
+Rutgers University
+University of Pittsburgh
+Pennsylvania State University
+Ohio State University
+University of Illinois
+University of Wisconsin
+University of Minnesota
+Indiana University
+University of Iowa
+University of Nebraska
+University of Kansas
+University of Colorado
+University of Oregon
+University of Washington
+University of Arizona
+University of Texas
+University of Florida
+University of Georgia
+University of Maryland
+University of Connecticut
+University of Missouri
+University of Arkansas
+University of Oklahoma
+University of Kentucky
+University of Tennessee
+University of Alabama
+University of Mississippi
+Louisiana State University
+University of Utah
+University of Nevada
+University of Idaho
+University of Montana
+University of Wyoming
+University of New Mexico
+University of South Carolina
+University of North Dakota
+University of South Dakota
+University of Vermont
+University of Maine
+University of New Hampshire
+University of Delaware
+University of Rhode Island
+University of Hawaii
+University of Alaska
+University of Central Florida
+University of Miami
+University of Houston
+University of Memphis
+University of Denver
+University of Portland
+University of San Diego
+University of San Francisco
+University of Cincinnati
+University of Dayton
+University of Akron
+University of Toledo
+University of Richmond
+University of Rochester
+University of Buffalo
+University of Massachusetts
+University of New Orleans
+University of Southern Mississippi
+University of North Texas
+Boston University
+American University
+George Washington University
+Fordham University
+Marquette University
+Villanova University
+Seton Hall University
+Loyola University Chicago
+Xavier University
+Creighton University
+DePaul University
+Saint Louis University
+Gonzaga University
+Santa Clara University
+San Jose State University
+Boise State University
+Utah State University
+Montana State University
+Idaho State University
+Auburn University
+Clemson University
+Florida State University
+Arizona State University
+New Mexico State University
+Colorado State University
+Portland State University
+Wichita State University
+Wright State University
+Ball State University
+Eastern Michigan University
+Western Michigan University
+Central Michigan University
+Northern Michigan University
+Southern Illinois University
+Western Illinois University
+Northern Illinois University
+Bowling Green State University
+Kent State University
+Northeastern University
+Old Dominion University
+George Mason University
+James Madison University
+Howard University
+Spelman College
+Morehouse College
+Fisk University
+Hampton University
+Amherst College
+Williams College
+Swarthmore College
+Pomona College
+Harvey Mudd College
+Wellesley College
+Barnard College
+Vassar College
+Smith College
+Mount Holyoke College
+Middlebury College
+Bowdoin College
+Colby College
+Bates College
+Hamilton College
+Colgate University
+Claremont McKenna College
+Scripps College
+Pitzer College
+Occidental College
+Trinity College
+Connecticut College
+Wesleyan University
+Kenyon College
+Oberlin College
+Grinnell College
+Carleton College
+Macalester College
+Lawrence University
+Beloit College
+Colorado College
+DePauw University
+Sewanee University
+Rhodes College
+Furman University
+Davidson College
+Elon University
+Rollins College
+Stetson University
+Transylvania University
+Centre College
+Hendrix College
+Millsaps College
+Flagler College
+Eckerd College
+Piedmont College
+Virginia Military Institute
+The Citadel
+Norwich University
+Rose-Hulman Institute of Technology
+Embry-Riddle Aeronautical University
+Franklin and Marshall College
+Gettysburg College
+Dickinson College
+Muhlenberg College
+Ursinus College
+Juniata College
+Elizabethtown College
+Lycoming College
+Susquehanna University
+Misericordia University

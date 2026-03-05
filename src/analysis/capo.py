@@ -14,6 +14,19 @@ Usage:
                         model_sizes=["micro"], loop_counts=[1, 4])
     results = run_capo_experiment(config)
     print_capo_results(results)
+
+Implementation notes:
+  - Paper uses gender-neutral "they/their" throughout (Appendix B.1 example).
+    Gender is still stored in Individual for S0 accounting but not expressed
+    in the text, so a model cannot recover the gender bit from the biography.
+  - Biographies packed into chunks use a block-causal attention mask to prevent
+    cross-biography attention leakage, matching the paper's masking setup.
+  - Name pools load from real first/last name lists (src/analysis/firstnames_1000.txt,
+    surnames_1000.txt).  Attribute pools use real-sounding names from dedicated
+    txt files in the same directory.
+  - Sign note: the paper's Eq. (Definition 1) has a typo in the second term
+    ("+p2" should be "-p2").  This implementation uses the semantically correct
+    exp(-p2) form.
 """
 
 import math
@@ -62,7 +75,87 @@ _MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December",
 ]
-_GENDER_PRONOUNS = {"male": "He", "female": "She"}
+
+# Gender-neutral pronoun per paper (Appendix B.1 example uses "they/their").
+# Gender is still stored in Individual for S0 information-theoretic accounting,
+# but is NOT expressed in the biography text so it cannot be recovered.
+_PRONOUN = "They"
+
+
+# ── Pool loading ───────────────────────────────────────────────────────────────
+
+_ANALYSIS_DIR = Path(__file__).parent
+
+
+def _load_pool(filename: str, n: int) -> list[str]:
+    """Load the first n non-empty lines from a pool file."""
+    path = _ANALYSIS_DIR / filename
+    with open(path) as f:
+        entries = [line.strip() for line in f if line.strip()]
+    if len(entries) < n:
+        raise ValueError(
+            f"Pool file '{filename}' has only {len(entries)} entries, need {n}."
+        )
+    return entries[:n]
+
+
+# Lazily loaded at first use so import is fast even without the tokenizer
+_FIRST_POOL: list[str] | None = None
+_MIDDLE_POOL: list[str] | None = None
+_LAST_POOL: list[str] | None = None
+_CITY_POOL: list[str] | None = None
+_UNIV_POOL: list[str] | None = None
+_MAJOR_POOL: list[str] | None = None
+_EMP_POOL: list[str] | None = None
+
+
+def _get_first_pool() -> list[str]:
+    global _FIRST_POOL
+    if _FIRST_POOL is None:
+        _FIRST_POOL = _load_pool("firstnames_1000.txt", N_FIRST_NAMES)
+    return _FIRST_POOL
+
+
+def _get_middle_pool() -> list[str]:
+    global _MIDDLE_POOL
+    if _MIDDLE_POOL is None:
+        _MIDDLE_POOL = _load_pool("firstnames_1000.txt", N_MIDDLE_NAMES)
+    return _MIDDLE_POOL
+
+
+def _get_last_pool() -> list[str]:
+    global _LAST_POOL
+    if _LAST_POOL is None:
+        _LAST_POOL = _load_pool("surnames_1000.txt", N_LAST_NAMES)
+    return _LAST_POOL
+
+
+def _get_city_pool() -> list[str]:
+    global _CITY_POOL
+    if _CITY_POOL is None:
+        _CITY_POOL = _load_pool("cities_100.txt", N_HOMETOWNS)
+    return _CITY_POOL
+
+
+def _get_univ_pool() -> list[str]:
+    global _UNIV_POOL
+    if _UNIV_POOL is None:
+        _UNIV_POOL = _load_pool("universities_200.txt", N_UNIVERSITIES)
+    return _UNIV_POOL
+
+
+def _get_major_pool() -> list[str]:
+    global _MAJOR_POOL
+    if _MAJOR_POOL is None:
+        _MAJOR_POOL = _load_pool("majors_300.txt", N_MAJORS)
+    return _MAJOR_POOL
+
+
+def _get_emp_pool() -> list[str]:
+    global _EMP_POOL
+    if _EMP_POOL is None:
+        _EMP_POOL = _load_pool("employers_263.txt", N_EMPLOYERS)
+    return _EMP_POOL
 
 
 # ── Individual dataclass ───────────────────────────────────────────────────────
@@ -73,20 +166,22 @@ class Individual:
 
     Name fields contribute to the name-recall loss p1.
     Attribute fields contribute to the attribute-recall loss p2.
+    Gender is stored for S0 information-theoretic accounting but is NOT
+    expressed in the biography text (we use gender-neutral "They").
     """
     # Name (p1)
-    first_name: str    # "Fname0001" .. "Fname0400"
-    middle_name: str   # "Mname0001" .. "Mname1000"
-    last_name: str     # "Lname0001" .. "Lname0400"
+    first_name: str
+    middle_name: str
+    last_name: str
     # Attributes (p2)
-    gender: str        # "male" | "female"
+    gender: str        # "male" | "female" — kept for S0 accounting, not in text
     birth_month: int   # 1–12
     birth_day: int     # 1–28
     birth_year: str    # "1800" .. "1999"
-    university: str    # "Univ001" .. "Univ200"
-    major: str         # "Major001" .. "Major300"
-    hometown: str      # "City001" .. "City100"
-    employer: str      # "Emp001" .. "Emp263"
+    university: str
+    major: str
+    hometown: str
+    employer: str
 
     @property
     def full_name(self) -> str:
@@ -98,12 +193,13 @@ class Individual:
 class BioSGenerator:
     """Generates the bioS(N) synthetic biography dataset.
 
-    Each individual has a unique (first, middle, last) name triple and
-    randomly assigned attributes from fixed-size pools.  Biographies are
-    rendered as short English sentences and tagged with character-level
-    spans indicating which text belongs to the name (p1) versus attribute
-    values (p2).  Template words ("was born on", etc.) are not tagged and
-    excluded from the capacity computation.
+    Each individual has a unique (first, middle, last) name triple drawn from
+    real-sounding name pools, and randomly assigned attributes from fixed-size
+    real-sounding pools.  Biographies use gender-neutral "They" throughout,
+    matching the paper's Appendix B.1 example.
+
+    Biography text and character-level spans indicating which text belongs to
+    the name (p1) vs. attribute values (p2) are produced by render().
     """
 
     def __init__(self, n_individuals: int, seed: int = 42):
@@ -116,52 +212,18 @@ class BioSGenerator:
         self.seed = seed
         self.individuals: list[Individual] = self._generate()
 
-    # ── Internal pools ─────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _first_pool() -> list[str]:
-        return [f"Fname{i+1:04d}" for i in range(N_FIRST_NAMES)]
-
-    @staticmethod
-    def _middle_pool() -> list[str]:
-        return [f"Mname{i+1:04d}" for i in range(N_MIDDLE_NAMES)]
-
-    @staticmethod
-    def _last_pool() -> list[str]:
-        return [f"Lname{i+1:04d}" for i in range(N_LAST_NAMES)]
-
-    @staticmethod
-    def _year_pool() -> list[str]:
-        return [str(1800 + i) for i in range(N_BIRTH_YEARS)]
-
-    @staticmethod
-    def _univ_pool() -> list[str]:
-        return [f"Univ{i+1:03d}" for i in range(N_UNIVERSITIES)]
-
-    @staticmethod
-    def _major_pool() -> list[str]:
-        return [f"Major{i+1:03d}" for i in range(N_MAJORS)]
-
-    @staticmethod
-    def _town_pool() -> list[str]:
-        return [f"City{i+1:03d}" for i in range(N_HOMETOWNS)]
-
-    @staticmethod
-    def _emp_pool() -> list[str]:
-        return [f"Emp{i+1:03d}" for i in range(N_EMPLOYERS)]
-
     # ── Generation ─────────────────────────────────────────────────────────────
 
     def _generate(self) -> list[Individual]:
         rng = random.Random(self.seed)
-        firsts = self._first_pool()
-        middles = self._middle_pool()
-        lasts = self._last_pool()
-        years = self._year_pool()
-        univs = self._univ_pool()
-        majors = self._major_pool()
-        towns = self._town_pool()
-        emps = self._emp_pool()
+        firsts = _get_first_pool()
+        middles = _get_middle_pool()
+        lasts = _get_last_pool()
+        years = [str(1800 + i) for i in range(N_BIRTH_YEARS)]
+        univs = _get_univ_pool()
+        majors = _get_major_pool()
+        towns = _get_city_pool()
+        emps = _get_emp_pool()
 
         seen: set[tuple[str, str, str]] = set()
         result: list[Individual] = []
@@ -195,12 +257,14 @@ class BioSGenerator:
     ) -> tuple[str, list[tuple[int, int]], list[tuple[int, int]]]:
         """Render a biography and return character spans for name and attribute tokens.
 
+        Uses gender-neutral "They" throughout — gender cannot be inferred from
+        the text, matching the paper's Appendix B.1 setup.
+
         Returns:
             text:        biography as a plain string
             name_spans:  list of (start, end) char offsets covering name text
             attr_spans:  list of (start, end) char offsets covering attribute values
         """
-        pronoun = _GENDER_PRONOUNS[ind.gender]
         month_str = _MONTH_NAMES[ind.birth_month - 1]
 
         # Build text from tagged fragments so spans are exact
@@ -216,13 +280,13 @@ class BioSGenerator:
             (str(ind.birth_day), "attr"),
             (", ", "tmpl"),
             (ind.birth_year, "attr"),
-            (f" in ", "tmpl"),
+            (" in ", "tmpl"),
             (ind.hometown, "attr"),
-            (f". {pronoun} studied ", "tmpl"),
+            (f". {_PRONOUN} studied ", "tmpl"),
             (ind.major, "attr"),
             (" at ", "tmpl"),
             (ind.university, "attr"),
-            (f". {pronoun} worked at ", "tmpl"),
+            (f". {_PRONOUN} worked at ", "tmpl"),
             (ind.employer, "attr"),
             (".", "tmpl"),
         ]
@@ -252,8 +316,11 @@ class BioSTrainDataset(Dataset):
     """Packs all biographies into fixed-length windows for language-model training.
 
     Biographies are concatenated with EOS separators and chunked into
-    (seq_len + 1)-token windows.  The trainer uses [:, :-1] as inputs
-    and [:, 1:] as next-token prediction targets.
+    (seq_len + 1)-token windows.  Each token is tagged with a biography ID
+    (bio_id) so the training loop can build a block-causal attention mask that
+    prevents cross-biography attention leakage.
+
+    __getitem__ returns (tokens, bio_ids), both shape (seq_len + 1,).
     """
 
     def __init__(self, generator: BioSGenerator, tokenizer, seq_len: int = 512):
@@ -261,23 +328,60 @@ class BioSTrainDataset(Dataset):
         chunk_len = seq_len + 1
 
         all_ids: list[int] = []
-        for text in generator.render_all():
+        all_bio_ids: list[int] = []
+
+        for bio_idx, text in enumerate(generator.render_all()):
             ids = tokenizer.encode(text, add_special_tokens=False)
             if ids:
                 all_ids.extend(ids)
+                all_bio_ids.extend([bio_idx] * len(ids))
+                # EOS separator belongs to the same biography it terminates
                 all_ids.append(eos)
+                all_bio_ids.append(bio_idx)
 
         n = len(all_ids) // chunk_len
-        self._chunks = (
-            torch.tensor(all_ids[: n * chunk_len], dtype=torch.long)
-            .view(n, chunk_len)
-        )
+        flat = torch.tensor(all_ids[: n * chunk_len], dtype=torch.long)
+        flat_bio = torch.tensor(all_bio_ids[: n * chunk_len], dtype=torch.long)
+        self._chunks = flat.view(n, chunk_len)
+        self._bio_ids = flat_bio.view(n, chunk_len)
 
     def __len__(self) -> int:
         return len(self._chunks)
 
-    def __getitem__(self, idx: int) -> Tensor:
-        return self._chunks[idx]
+    def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
+        return self._chunks[idx], self._bio_ids[idx]
+
+
+# ── Block-causal attention mask ────────────────────────────────────────────────
+
+def _build_block_causal_mask(bio_ids: Tensor) -> Tensor:
+    """Build an additive attention mask that enforces block-causal structure.
+
+    Allows position i to attend to position j iff:
+      1. same biography: bio_ids[:, j] == bio_ids[:, i]
+      2. causal:         j <= i
+
+    Args:
+        bio_ids: (B, S) integer biography-ID per token
+
+    Returns:
+        (B, 1, S, S) float mask; 0.0 = attend, -inf = blocked
+    """
+    B, S = bio_ids.shape
+    device = bio_ids.device
+
+    # same_bio[b, i, j] = True iff bio_ids[b, i] == bio_ids[b, j]
+    same_bio = bio_ids.unsqueeze(2) == bio_ids.unsqueeze(1)  # (B, S, S)
+
+    # causal[i, j] = True iff j <= i
+    causal = torch.ones(S, S, dtype=torch.bool, device=device).tril()
+
+    # Allow attention only where both conditions hold
+    allow = same_bio & causal.unsqueeze(0)  # (B, S, S)
+
+    mask = torch.zeros(B, 1, S, S, device=device)
+    mask.masked_fill_(~allow.unsqueeze(1), float("-inf"))
+    return mask  # (B, 1, S, S)
 
 
 # ── Token-span helpers ─────────────────────────────────────────────────────────
@@ -333,9 +437,11 @@ def compute_capacity_ratio(
       R(F)       = (name_bits + attr_bits) / P
 
     Each biography is prefixed with an EOS token to match the training
-    distribution (packed sequences separate biographies with EOS).  This
-    allows the model to use its learned start-of-biography cue and enables
-    evaluation of the very first biography token.
+    distribution (packed sequences separate biographies with EOS).
+
+    Note on sign: the paper's Definition 1 has a typo in the second term
+    ("+p2" should be "-p2").  This implementation uses the semantically
+    correct exp(-p2) form.
 
     Args:
         model:     trained LoopLM (switched to eval mode internally)
@@ -362,8 +468,6 @@ def compute_capacity_ratio(
             continue
 
         # Prepend EOS to match training distribution: biographies follow EOS
-        # in the packed training sequences.  This gives the model the same
-        # start-of-biography context cue it saw during training.
         ids = [eos_id] + bio_ids
 
         # input_ids = ids[:-1], targets = ids[1:] = bio_ids
@@ -380,17 +484,10 @@ def compute_capacity_ratio(
         attr_toks = _char_spans_to_token_indices(text, attr_spans, tokenizer)
 
         def _nll_sum(tok_indices: list[int]) -> float:
-            """Sum of NLL for predicting each bio token at index k.
-
-            With EOS prepended: input_ids[k] = ids[k], so logits[k]
-            predicts targets[k] = bio_ids[k].  pred_pos = k.
-            """
             total = 0.0
             for k in tok_indices:
-                pred_pos = k
-                if pred_pos < 0 or pred_pos >= S:
-                    continue
-                total += -log_probs[pred_pos, targets[pred_pos]].item()
+                if 0 <= k < S:
+                    total += -log_probs[k, targets[k]].item()
             return total
 
         total_name_nll += _nll_sum(name_toks)
@@ -443,8 +540,8 @@ def make_capo_model_config(size: str, loop_count: int) -> LoopLMConfig:
 @dataclass
 class CapoConfig:
     """Configuration for the Capo (knowledge capacity) experiment."""
-    n_individuals: int = 10_000
-    train_exposures: int = 100       # paper uses 1000; reduce for speed
+    n_individuals: int = 20_000
+    train_exposures: int = 1_000      # paper: 1000 exposures
     model_sizes: list[str] = field(default_factory=lambda: ["micro", "mini"])
     loop_counts: list[int] = field(default_factory=lambda: [1, 4])
 
@@ -493,6 +590,7 @@ def run_capo_single(
       - 1000-step warmup → cosine decay to 10% of peak LR
       - Each biography seen `train_exposures` times
       - Batch size 192, context length 512
+      - Block-causal attention mask prevents cross-biography leakage
     """
     torch.manual_seed(config.seed)
     model = LoopLM(model_config).to(device)
@@ -528,10 +626,17 @@ def run_capo_single(
     model.train()
     data_iter = _infinite_iter(dataloader)
     for step in range(total_steps):
-        batch = next(data_iter).to(device)
-        x, tgt = batch[:, :-1], batch[:, 1:]
+        tokens, bio_ids = next(data_iter)
+        tokens = tokens.to(device)
+        bio_ids = bio_ids.to(device)
 
-        out = model(x, num_steps=loop_count)
+        x, tgt = tokens[:, :-1], tokens[:, 1:]
+        bio_ids_x = bio_ids[:, :-1]
+
+        # Block-causal mask: prevent cross-biography attention
+        attn_mask = _build_block_causal_mask(bio_ids_x)
+
+        out = model(x, num_steps=loop_count, attention_mask=attn_mask)
         logits = out.logits[-1]   # final-step logits
         B, S, V = logits.shape
         loss = F.cross_entropy(logits.reshape(B * S, V), tgt.reshape(B * S))

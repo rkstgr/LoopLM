@@ -43,7 +43,13 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         self.o_proj = nn.Linear(hidden_size, hidden_size, bias=False)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
         B, S, _ = x.shape
 
         q = self.q_proj(x).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
@@ -54,8 +60,12 @@ class MultiHeadAttention(nn.Module):
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)
 
-        # Causal attention — uses flash attention kernel when available
-        out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        if attn_mask is not None:
+            # Custom mask already encodes causality; disable built-in causal mask
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, is_causal=False)
+        else:
+            # Default: standard causal attention
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # out: (B, num_heads, S, head_dim)
 
         out = out.transpose(1, 2).contiguous().view(B, S, -1)
@@ -81,9 +91,15 @@ class TransformerBlock(nn.Module):
         self.ffn = SwiGLUFFN(config.hidden_size, config.intermediate_size)
         self.post_ffn_norm = RMSNorm(config.hidden_size)
 
-    def forward(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
         # Attention with sandwich norm
-        x = x + self.post_attn_norm(self.attn(self.pre_attn_norm(x), cos, sin))
+        x = x + self.post_attn_norm(self.attn(self.pre_attn_norm(x), cos, sin, attn_mask))
         # FFN with sandwich norm
         x = x + self.post_ffn_norm(self.ffn(self.pre_ffn_norm(x)))
         return x

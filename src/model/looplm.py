@@ -89,11 +89,15 @@ class LoopLM(nn.Module):
         self,
         input_ids: Tensor,
         num_steps: int | None = None,
+        attention_mask: Tensor | None = None,
     ) -> LoopLMOutput:
         """
         Args:
-            input_ids: (B, S) token indices
-            num_steps:  number of recurrent steps; defaults to config.max_recurrent_steps
+            input_ids:      (B, S) token indices
+            num_steps:      number of recurrent steps; defaults to config.max_recurrent_steps
+            attention_mask: optional (B, 1, S, S) additive float mask passed to every
+                            attention layer.  0.0 = attend, -inf = blocked.
+                            When None, standard causal masking is used.
 
         Returns:
             LoopLMOutput with logits and exit_lambdas for each step
@@ -112,7 +116,7 @@ class LoopLM(nn.Module):
         for _ in range(num_steps):
             # Apply the full layer stack (shared weights reused each step)
             for layer in self.layers:
-                h = layer(h, cos, sin)
+                h = layer(h, cos, sin, attention_mask)
 
             # LM head output
             logits = self.lm_head(self.final_norm(h))  # (B, S, vocab_size)

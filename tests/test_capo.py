@@ -13,12 +13,14 @@ from src.analysis.capo import (
     N_FIRST_NAMES,
     N_MIDDLE_NAMES,
     N_LAST_NAMES,
+    _PRONOUN,
     Individual,
     BioSGenerator,
     BioSTrainDataset,
     CapoConfig,
     CapoResult,
     _char_spans_to_token_indices,
+    _build_block_causal_mask,
     compute_capacity_ratio,
     make_capo_model_config,
     run_capo_single,
@@ -39,6 +41,10 @@ def test_s0_log2_approx():
 def test_log2_n0_approx():
     assert 26.0 < LOG2_N0 < 28.0, f"LOG2_N0={LOG2_N0:.4f}"
 
+def test_pronoun_is_gender_neutral():
+    """Paper uses gender-neutral 'They' so gender cannot be inferred from text."""
+    assert _PRONOUN == "They"
+
 
 # ── BioSGenerator ─────────────────────────────────────────────────────────────
 
@@ -58,17 +64,23 @@ def test_generator_attributes_in_pools():
         assert 1 <= ind.birth_month <= 12
         assert 1 <= ind.birth_day <= 28
         assert 1800 <= int(ind.birth_year) <= 1999
-        assert ind.university.startswith("Univ")
-        assert ind.major.startswith("Major")
-        assert ind.hometown.startswith("City")
-        assert ind.employer.startswith("Emp")
+        # Real pool entries — just verify they are non-empty strings
+        assert isinstance(ind.university, str) and len(ind.university) > 0
+        assert isinstance(ind.major, str) and len(ind.major) > 0
+        assert isinstance(ind.hometown, str) and len(ind.hometown) > 0
+        assert isinstance(ind.employer, str) and len(ind.employer) > 0
 
 def test_generator_names_in_pools():
     gen = BioSGenerator(n_individuals=10)
     for ind in gen.individuals:
-        assert ind.first_name.startswith("Fname")
-        assert ind.middle_name.startswith("Mname")
-        assert ind.last_name.startswith("Lname")
+        # Real name pools — just verify non-empty strings (no "Fname####" placeholders)
+        assert isinstance(ind.first_name, str) and len(ind.first_name) > 0
+        assert isinstance(ind.middle_name, str) and len(ind.middle_name) > 0
+        assert isinstance(ind.last_name, str) and len(ind.last_name) > 0
+        # Must NOT contain synthetic placeholder patterns
+        assert not ind.first_name.startswith("Fname")
+        assert not ind.middle_name.startswith("Mname")
+        assert not ind.last_name.startswith("Lname")
 
 def test_generator_rejects_oversized_n():
     with pytest.raises(ValueError, match="exceeds name pool"):
@@ -107,6 +119,16 @@ def test_render_contains_attributes():
         assert ind.major in text
         assert ind.hometown in text
         assert ind.employer in text
+
+def test_render_uses_gender_neutral_pronoun():
+    """Rendered bios must use 'They', never 'He' or 'She'."""
+    gen = BioSGenerator(n_individuals=20)
+    for ind in gen.individuals:
+        text, _, _ = gen.render(ind)
+        # Check for gender-neutral pronoun in template positions
+        assert " They " in text or text.endswith(" They") or ". They " in text
+        # No gendered pronouns
+        assert " He " not in text and " She " not in text
 
 def test_render_name_span_alignment():
     gen = BioSGenerator(n_individuals=5)
@@ -178,17 +200,68 @@ def test_bios_train_dataset_chunk_shape():
     ds = BioSTrainDataset(gen, tok, seq_len=seq_len)
     assert len(ds) > 0
     for i in range(min(5, len(ds))):
-        chunk = ds[i]
-        assert chunk.shape == (seq_len + 1,)
-        assert chunk.dtype == torch.long
+        tokens, bio_ids = ds[i]
+        assert tokens.shape == (seq_len + 1,)
+        assert bio_ids.shape == (seq_len + 1,)
+        assert tokens.dtype == torch.long
+        assert bio_ids.dtype == torch.long
 
 def test_bios_train_dataset_no_overflow():
     gen = BioSGenerator(n_individuals=10, seed=0)
     tok = FakeFastTokenizer()
     ds = BioSTrainDataset(gen, tok, seq_len=4)
     for i in range(len(ds)):
-        chunk = ds[i]
-        assert (chunk >= 0).all()
+        tokens, bio_ids = ds[i]
+        assert (tokens >= 0).all()
+        assert (bio_ids >= 0).all()
+
+def test_bios_train_dataset_bio_ids_contiguous():
+    """Bio IDs within a chunk must be non-decreasing (biographies are packed in order)."""
+    gen = BioSGenerator(n_individuals=10, seed=0)
+    tok = FakeFastTokenizer()
+    ds = BioSTrainDataset(gen, tok, seq_len=8)
+    for i in range(min(5, len(ds))):
+        _, bio_ids = ds[i]
+        # bio_ids should be non-decreasing since we pack bios in order
+        assert (bio_ids[1:] >= bio_ids[:-1]).all(), \
+            f"bio_ids not non-decreasing: {bio_ids.tolist()}"
+
+
+# ── _build_block_causal_mask ──────────────────────────────────────────────────
+
+def test_block_causal_mask_shape():
+    bio_ids = torch.tensor([[0, 0, 1, 1, 2, 2]])
+    mask = _build_block_causal_mask(bio_ids)
+    assert mask.shape == (1, 1, 6, 6)
+
+def test_block_causal_mask_same_bio_causal():
+    """Position i can attend to j<i in the same biography."""
+    bio_ids = torch.tensor([[0, 0, 0]])
+    mask = _build_block_causal_mask(bio_ids)
+    # Position 2 can attend to 0 and 1
+    assert mask[0, 0, 2, 0] == 0.0
+    assert mask[0, 0, 2, 1] == 0.0
+    assert mask[0, 0, 2, 2] == 0.0
+    # Position 0 cannot attend to position 1 (future)
+    assert mask[0, 0, 0, 1] == float("-inf")
+
+def test_block_causal_mask_cross_bio_blocked():
+    """Cross-biography attention must be blocked in both directions."""
+    bio_ids = torch.tensor([[0, 0, 1, 1]])
+    mask = _build_block_causal_mask(bio_ids)
+    # Bio 1 position 2 cannot attend to bio 0 positions 0, 1
+    assert mask[0, 0, 2, 0] == float("-inf")
+    assert mask[0, 0, 2, 1] == float("-inf")
+    # Bio 0 position 1 cannot attend to bio 1 positions (future anyway, but also different bio)
+    assert mask[0, 0, 1, 2] == float("-inf")
+    assert mask[0, 0, 1, 3] == float("-inf")
+
+def test_block_causal_mask_self_attend():
+    """Every position can always attend to itself."""
+    bio_ids = torch.tensor([[0, 1, 2, 0]])
+    mask = _build_block_causal_mask(bio_ids)
+    for i in range(4):
+        assert mask[0, 0, i, i] == 0.0, f"Position {i} should attend to itself"
 
 
 # ── _char_spans_to_token_indices ──────────────────────────────────────────────
@@ -274,11 +347,8 @@ def test_compute_capacity_ratio_perfect_model_gives_high_bits():
     model, _ = _tiny_model()
     ratio_random, _, _ = compute_capacity_ratio(model, gen, tok, num_steps=1, device=device)
 
-    # Compute the theoretical maximum for N=2 individuals
-    # max_bits = N * (LOG2_N0 + LOG2_S0)
-    # Ratio = max_bits / P is some positive number
     # For a random model with vocab=64, loss ≈ log(64) ≈ 4.16 nats
-    # We just verify random is finite and non-negative
+    # We just verify it is finite and non-negative
     assert ratio_random >= 0.0
 
 
