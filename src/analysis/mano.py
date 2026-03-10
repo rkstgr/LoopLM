@@ -11,7 +11,21 @@ capability beyond raw capacity.
 Usage:
     from src.analysis.mano import ManoConfig, run_mano_experiment, print_mano_results
 
-    config = ManoConfig(max_ops=10, model_configs=[(4, 1), (2, 2), (1, 4)])
+    # Paper reproduction (hidden=1024, all 7 configs, LR search)
+    config = ManoConfig(
+        max_ops=10,
+        lr_candidates=PAPER_LR_CANDIDATES,
+    )
+    results = run_mano_experiment(config)
+    print_mano_results(results)
+
+    # Quick prototyping (small models)
+    config = ManoConfig(
+        max_ops=10,
+        model_configs=[(4, 1), (2, 2), (1, 4)],
+        model_preset="small",
+        train_steps=5000,
+    )
     results = run_mano_experiment(config)
     print_mano_results(results)
 
@@ -330,6 +344,24 @@ _MODEL_PRESETS: dict[str, dict] = {
     "paper": dict(hidden_size=1024, num_heads=16),
 }
 
+# Paper Section 6.2 / Appendix B.2: exact model configurations.
+# Baselines: {2,3,6,12}×1 (standard transformers)
+# Looped: k×(12/k) for k ∈ {2,3,6} → 2×6, 3×4, 6×2
+PAPER_MODEL_CONFIGS: list[tuple[int, int]] = [
+    (2, 1), (3, 1), (6, 1), (12, 1),  # baselines
+    (2, 6), (3, 4), (6, 2),            # looped (iso-param comparisons)
+]
+
+# Paper Appendix B.2: difficulty levels → training steps
+PAPER_DIFFICULTIES: dict[int, int] = {
+    10: 80_000,
+    16: 110_000,
+    24: 200_000,
+}
+
+# Paper Appendix B.2: LR search grid
+PAPER_LR_CANDIDATES: list[float] = [5e-5, 1e-4, 2e-4, 5e-4]
+
 
 # ── Experiment config & result ───────────────────────────────────────────────
 
@@ -343,15 +375,15 @@ class ManoConfig:
     n_eval_examples: int = 1_000  # Evaluation examples (hardest difficulty)
 
     # Model configurations: list of (num_layers, loop_count) pairs.
-    # All share the same hidden_size. The key comparison is iso-FLOP:
-    # e.g., (8, 1) vs (4, 2) vs (2, 4) all do 8 layer passes per token.
+    # Paper: baselines {2,3,6,12}×1, looped {2×6, 3×4, 6×2}
     model_configs: list[tuple[int, int]] = field(
-        default_factory=lambda: [(4, 1), (2, 2), (1, 4)]
+        default_factory=lambda: list(PAPER_MODEL_CONFIGS)
     )
-    model_preset: str = "small"  # Key into _MODEL_PRESETS
+    model_preset: str = "paper"  # Key into _MODEL_PRESETS
 
     # Training hyperparams (paper Appendix B.2)
     lr: float = 1e-4
+    lr_candidates: list[float] | None = None  # If set, search over these LRs
     weight_decay: float = 0.1
     beta2: float = 0.98
     eps: float = 1e-6
@@ -382,6 +414,7 @@ class ManoResult:
     max_ops: int
     accuracy: float
     final_loss: float
+    lr: float = 1e-4  # LR that produced this result
 
 
 # ── Single-run training ──────────────────────────────────────────────────────
@@ -585,6 +618,7 @@ def run_mano_single(
         max_ops=config.max_ops,
         accuracy=accuracy,
         final_loss=last_loss,
+        lr=config.lr,
     )
 
 
@@ -594,11 +628,17 @@ def run_mano_single(
 def run_mano_experiment(config: ManoConfig) -> list[ManoResult]:
     """Run the full Mano experiment across all (num_layers, loop_count) pairs.
 
+    When config.lr_candidates is set, tries each LR for every model config
+    and keeps the result with the highest accuracy (paper: "report the best
+    performance" across seeds and LRs).
+
     Expected result: looped models outperform iso-parameter non-looped models,
     confirming that looping adds knowledge manipulation capability.
     """
     device = _resolve_device(config.device)
     tokenizer = ManoTokenizer(config.max_ops)
+
+    lr_list = config.lr_candidates or [config.lr]
 
     results: list[ManoResult] = []
     for num_layers, loop_count in config.model_configs:
@@ -607,13 +647,49 @@ def run_mano_experiment(config: ManoConfig) -> list[ManoResult]:
             f"\n[mano] layers={num_layers}  loop={loop_count}  "
             f"total_depth={total_depth}  max_ops={config.max_ops}"
         )
-        result = run_mano_single(
-            tokenizer, num_layers, loop_count, config, device
-        )
-        results.append(result)
+
+        best_result: ManoResult | None = None
+        for lr in lr_list:
+            lr_config = ManoConfig(
+                max_ops=config.max_ops,
+                n_train_examples=config.n_train_examples,
+                n_eval_examples=config.n_eval_examples,
+                model_configs=config.model_configs,
+                model_preset=config.model_preset,
+                lr=lr,
+                lr_candidates=None,  # prevent recursion
+                weight_decay=config.weight_decay,
+                beta2=config.beta2,
+                eps=config.eps,
+                batch_size=config.batch_size,
+                accumulation_steps=config.accumulation_steps,
+                seq_len=config.seq_len,
+                warmup_steps=config.warmup_steps,
+                grad_clip=config.grad_clip,
+                train_steps=config.train_steps,
+                beta_kl=config.beta_kl,
+                log_every=config.log_every,
+                device=config.device,
+                seed=config.seed,
+                output_dir=config.output_dir,
+                use_wandb=config.use_wandb,
+                wandb_project=config.wandb_project,
+                wandb_run_name=config.wandb_run_name,
+            )
+            if len(lr_list) > 1:
+                print(f"  [lr={lr:.1e}]")
+            result = run_mano_single(
+                tokenizer, num_layers, loop_count, lr_config, device
+            )
+            if best_result is None or result.accuracy > best_result.accuracy:
+                best_result = result
+
+        assert best_result is not None
+        results.append(best_result)
+        lr_tag = f"  best_lr={best_result.lr:.1e}" if len(lr_list) > 1 else ""
         print(
-            f"  → accuracy={result.accuracy:.4f}  loss={result.final_loss:.4f}  "
-            f"params={result.n_params:,}"
+            f"  → accuracy={best_result.accuracy:.4f}  loss={best_result.final_loss:.4f}  "
+            f"params={best_result.n_params:,}{lr_tag}"
         )
 
     return results
@@ -624,22 +700,24 @@ def run_mano_experiment(config: ManoConfig) -> list[ManoResult]:
 
 def print_mano_results(results: list[ManoResult]) -> None:
     """Print a formatted table of Mano experiment results."""
-    print("\n" + "=" * 75)
-    print(f"{'MANO RESULTS — Knowledge Manipulation':^75}")
-    print("=" * 75)
+    print("\n" + "=" * 85)
+    print(f"{'MANO RESULTS — Knowledge Manipulation':^85}")
+    print("=" * 85)
     print(
         f"  {'Layers':>6} {'Loop':>5} {'Depth':>6} {'Params':>10} "
-        f"{'max_ops':>8} {'Accuracy':>10} {'Loss':>8}"
+        f"{'max_ops':>8} {'Accuracy':>10} {'Loss':>8} {'LR':>10}"
     )
-    print("  " + "-" * 71)
+    print("  " + "-" * 81)
     for r in results:
         print(
             f"  {r.num_layers:>6} {r.loop_count:>5} {r.total_depth:>6} "
             f"{r.n_params / 1e6:>8.2f}M {r.max_ops:>8} "
-            f"{r.accuracy:>10.4f} {r.final_loss:>8.4f}"
+            f"{r.accuracy:>10.4f} {r.final_loss:>8.4f} {r.lr:>10.1e}"
         )
-    print("=" * 75)
-    print("Expected: looped models outperform non-looped at same total depth")
+    print("=" * 85)
+    print("Expected: looped models outperform non-looped at same param count")
+    print("  iso-param pairs: (2×1 vs 2×6), (3×1 vs 3×4), (6×1 vs 6×2)")
+    print("  iso-FLOP baseline: 12×1 vs all looped models (all 12 effective layers)")
     print()
 
 

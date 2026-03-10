@@ -29,6 +29,11 @@ Usage:
         --max-ops 5 --n-train 10000 --train-steps 500 \
         --model-preset tiny --model-configs 4:1 2:2 1:4 \
         --batch-size 16 --seq-len 64
+
+    # Paper reproduction (hidden=1024, all configs, LR search, 3 seeds)
+    uv run scripts/analyze.py mano \
+        --max-ops 10 --model-preset paper --lr-search \
+        --num-seeds 3 --report-best
 """
 
 import argparse
@@ -219,18 +224,29 @@ def build_parser() -> argparse.ArgumentParser:
     mano.add_argument(
         "--model-configs",
         nargs="+",
-        default=["4:1", "2:2", "1:4"],
-        help="Model configs as layers:loops pairs (e.g., 4:1 2:2 1:4)",
+        default=None,
+        help="Model configs as layers:loops pairs (e.g., 2:1 3:1 6:1 12:1 2:6 3:4 6:2). "
+             "Default: paper configs (baselines + looped)",
     )
     mano.add_argument(
         "--model-preset",
-        default="small",
+        default="paper",
         choices=["tiny", "small", "medium", "paper"],
-        help="Model size preset (hidden dim / num heads)",
+        help="Model size preset: paper=hidden 1024 (default), small=128, etc.",
     )
     mano.add_argument("--num-seeds", type=int, default=1)
+    mano.add_argument(
+        "--report-best",
+        action="store_true",
+        help="Report best accuracy across seeds (paper style) instead of mean±std",
+    )
 
     mano.add_argument("--lr", type=float, default=1e-4)
+    mano.add_argument(
+        "--lr-search",
+        action="store_true",
+        help="Search over paper LRs {5e-5, 1e-4, 2e-4, 5e-4} per model config",
+    )
     mano.add_argument("--weight-decay", type=float, default=0.1)
     mano.add_argument("--batch-size", type=int, default=128)
     mano.add_argument("--accumulation-steps", type=int, default=1)
@@ -291,11 +307,19 @@ def run_mano(args) -> None:
     from src.analysis.mano import (
         ManoConfig,
         ManoResult,
+        PAPER_LR_CANDIDATES,
+        PAPER_MODEL_CONFIGS,
         print_mano_results,
         run_mano_experiment,
     )
 
-    model_configs = _parse_model_configs(args.model_configs)
+    if args.model_configs is not None:
+        model_configs = _parse_model_configs(args.model_configs)
+    else:
+        model_configs = list(PAPER_MODEL_CONFIGS)
+
+    lr_candidates = PAPER_LR_CANDIDATES if args.lr_search else None
+    report_best = getattr(args, "report_best", False)
 
     print(f"Mano experiment")
     print(f"  Max ops       : {args.max_ops}")
@@ -306,6 +330,8 @@ def run_mano(args) -> None:
     print(f"  Accumulation  : {args.accumulation_steps}")
     print(f"  Train steps   : {args.train_steps:,}")
     print(f"  Seeds         : {args.num_seeds}")
+    print(f"  LR search     : {lr_candidates or [args.lr]}")
+    print(f"  Report        : {'best' if report_best else 'mean±std'}")
     print(f"  Device        : {args.device}")
     print()
 
@@ -320,6 +346,7 @@ def run_mano(args) -> None:
             model_configs=model_configs,
             model_preset=args.model_preset,
             lr=args.lr,
+            lr_candidates=lr_candidates,
             weight_decay=args.weight_decay,
             batch_size=args.batch_size,
             accumulation_steps=args.accumulation_steps,
@@ -343,44 +370,72 @@ def run_mano(args) -> None:
         final_results = all_results[0]
         print_mano_results(final_results)
     else:
-        print("\n" + "=" * 80)
-        print(f"{'MANO RESULTS — Mean ± Std across seeds':^80}")
-        print("=" * 80)
         n_runs = len(all_results[0])
-        print(
-            f"  {'Layers':>6} {'Loop':>5} {'Depth':>6} {'Params':>10} "
-            f"{'max_ops':>8} {'Accuracy':>16} {'Loss':>8}"
-        )
-        print("  " + "-" * 76)
-        for i in range(n_runs):
-            r0 = all_results[0][i]
-            acc_vals = [all_results[s][i].accuracy for s in range(args.num_seeds)]
-            acc_mean = statistics.mean(acc_vals)
-            acc_std = statistics.stdev(acc_vals) if args.num_seeds > 1 else 0.0
-            loss_mean = statistics.mean(
-                [all_results[s][i].final_loss for s in range(args.num_seeds)]
-            )
-            print(
-                f"  {r0.num_layers:>6} {r0.loop_count:>5} {r0.total_depth:>6} "
-                f"{r0.n_params / 1e6:>8.2f}M {r0.max_ops:>8} "
-                f"{acc_mean:>8.4f}±{acc_std:.4f} {loss_mean:>8.4f}"
-            )
-        print("=" * 80)
-        print("Expected: looped models outperform non-looped at same total depth")
-        print()
-        final_results = all_results[0]
 
-    # Save results
+        if report_best:
+            # Paper style: report best accuracy across seeds
+            print("\n" + "=" * 85)
+            print(f"{'MANO RESULTS — Best across seeds':^85}")
+            print("=" * 85)
+            print(
+                f"  {'Layers':>6} {'Loop':>5} {'Depth':>6} {'Params':>10} "
+                f"{'max_ops':>8} {'Accuracy':>10} {'Loss':>8} {'LR':>10}"
+            )
+            print("  " + "-" * 81)
+            final_results = []
+            for i in range(n_runs):
+                # Pick seed with best accuracy for this config
+                best_seed = max(range(args.num_seeds), key=lambda s: all_results[s][i].accuracy)
+                r = all_results[best_seed][i]
+                final_results.append(r)
+                print(
+                    f"  {r.num_layers:>6} {r.loop_count:>5} {r.total_depth:>6} "
+                    f"{r.n_params / 1e6:>8.2f}M {r.max_ops:>8} "
+                    f"{r.accuracy:>10.4f} {r.final_loss:>8.4f} {r.lr:>10.1e}"
+                )
+            print("=" * 85)
+        else:
+            print("\n" + "=" * 85)
+            print(f"{'MANO RESULTS — Mean ± Std across seeds':^85}")
+            print("=" * 85)
+            print(
+                f"  {'Layers':>6} {'Loop':>5} {'Depth':>6} {'Params':>10} "
+                f"{'max_ops':>8} {'Accuracy':>16} {'Loss':>8}"
+            )
+            print("  " + "-" * 81)
+            final_results = []
+            for i in range(n_runs):
+                r0 = all_results[0][i]
+                acc_vals = [all_results[s][i].accuracy for s in range(args.num_seeds)]
+                acc_mean = statistics.mean(acc_vals)
+                acc_std = statistics.stdev(acc_vals) if args.num_seeds > 1 else 0.0
+                loss_mean = statistics.mean(
+                    [all_results[s][i].final_loss for s in range(args.num_seeds)]
+                )
+                print(
+                    f"  {r0.num_layers:>6} {r0.loop_count:>5} {r0.total_depth:>6} "
+                    f"{r0.n_params / 1e6:>8.2f}M {r0.max_ops:>8} "
+                    f"{acc_mean:>8.4f}±{acc_std:.4f} {loss_mean:>8.4f}"
+                )
+                final_results.append(r0)
+            print("=" * 85)
+
+        print("Expected: looped models outperform non-looped at same param count")
+        print()
+
+    # Save results (all seeds, all configs)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     results_path = output_dir / "mano_results.csv"
     with open(results_path, "w") as f:
-        f.write("num_layers,loop_count,total_depth,n_params,max_ops,accuracy,final_loss\n")
-        for r in final_results:
-            f.write(
-                f"{r.num_layers},{r.loop_count},{r.total_depth},{r.n_params},"
-                f"{r.max_ops},{r.accuracy:.6f},{r.final_loss:.6f}\n"
-            )
+        f.write("seed,num_layers,loop_count,total_depth,n_params,max_ops,accuracy,final_loss,lr\n")
+        for seed_idx, seed_results in enumerate(all_results):
+            seed = args.seed + seed_idx
+            for r in seed_results:
+                f.write(
+                    f"{seed},{r.num_layers},{r.loop_count},{r.total_depth},{r.n_params},"
+                    f"{r.max_ops},{r.accuracy:.6f},{r.final_loss:.6f},{r.lr:.1e}\n"
+                )
     print(f"Results saved to {results_path}")
 
 
