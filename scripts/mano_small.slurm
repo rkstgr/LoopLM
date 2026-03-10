@@ -33,15 +33,21 @@ export WANDB_MODE=offline
 export WANDB_DIR="$WANDB_DIR"
 
 # ── Small run: L=10, 1 seed, fixed LR, 5 configs ────────────────────────────
-CONFIGS=("6:1" "12:1" "2:6" "3:4" "6:2")
+# Job 0 (6:1) runs fine with batch=128. Jobs 1-4 do 12 effective layers
+# and need gradient accumulation to avoid OOM.
+CONFIGS=(          "6:1" "12:1" "2:6" "3:4" "6:2")
+BATCH_SIZES=(       128    64    64    64    64  )
+ACCUM_STEPS=(         1     2     2     2     2  )
 
 CONFIG="${CONFIGS[$SLURM_ARRAY_TASK_ID]}"
+BATCH_SIZE="${BATCH_SIZES[$SLURM_ARRAY_TASK_ID]}"
+ACCUMULATION="${ACCUM_STEPS[$SLURM_ARRAY_TASK_ID]}"
 TASK_OUT_DIR="${OUT_DIR}/task_${SLURM_ARRAY_TASK_ID}"
 
 mkdir -p "$TASK_OUT_DIR"
 
 echo "==> Node: $(hostname)  GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
-echo "==> Array task ${SLURM_ARRAY_TASK_ID}: config=${CONFIG}"
+echo "==> Array task ${SLURM_ARRAY_TASK_ID}: config=${CONFIG}  batch=${BATCH_SIZE}  accum=${ACCUMULATION}"
 echo "==> Output dir: $TASK_OUT_DIR"
 
 cd "$REPO_DIR"
@@ -52,7 +58,8 @@ uv run scripts/analyze.py mano \
     --model-preset       paper                 \
     --model-configs      "$CONFIG"             \
     --train-steps        80000                 \
-    --batch-size         128                   \
+    --batch-size         "$BATCH_SIZE"         \
+    --accumulation-steps "$ACCUMULATION"       \
     --lr                 1e-4                  \
     --num-seeds          1                     \
     --seed               42                    \
