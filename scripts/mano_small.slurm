@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=02:00:00
+#SBATCH --time=36:00:00
 #SBATCH --job-name=looplm_mano_small
 #SBATCH --array=0-4
 #SBATCH --output=/p/scratch/westai0047/looplm/logs/%x_%A_%a.out
@@ -36,8 +36,8 @@ export WANDB_DIR="$WANDB_DIR"
 # Job 0 (6:1) runs fine with batch=128. Jobs 1-4 do 12 effective layers
 # and need gradient accumulation to avoid OOM.
 CONFIGS=(          "6:1" "12:1" "2:6" "3:4" "6:2")
-BATCH_SIZES=(       128    64    64    64    64  )
-ACCUM_STEPS=(         1     2     2     2     2  )
+BATCH_SIZES=(       128    64    64    64    32  )
+ACCUM_STEPS=(         1     2     2     2     4  )
 
 CONFIG="${CONFIGS[$SLURM_ARRAY_TASK_ID]}"
 BATCH_SIZE="${BATCH_SIZES[$SLURM_ARRAY_TASK_ID]}"
