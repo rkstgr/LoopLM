@@ -238,7 +238,7 @@ def build_block_causal_mask(problem_ids: Tensor) -> Tensor:
     allow = same_prob & causal.unsqueeze(0)
 
     mask = torch.zeros(B, 1, S, S, device=device)
-    mask.masked_fill_(~allow.unsqueeze(1), float("-inf"))
+    mask.masked_fill_(~allow.unsqueeze(1), torch.finfo(mask.dtype).min)
     return mask
 
 
@@ -370,6 +370,10 @@ class ManoConfig:
     seed: int = 42
     output_dir: str = "runs/mano"
 
+    use_wandb: bool = False
+    wandb_project: str = "looplm"
+    wandb_run_name: str | None = None
+
 
 @dataclass
 class ManoResult:
@@ -413,6 +417,34 @@ def run_mano_single(
     torch.manual_seed(config.seed)
     model = LoopLM(model_config).to(device)
     P = sum(p.numel() for p in model.parameters())
+
+    # wandb init (per run, so each config×seed gets its own run)
+    if config.use_wandb:
+        import wandb
+
+        run_name = config.wandb_run_name or (
+            f"mano_L{num_layers}_T{loop_count}_s{config.seed}"
+        )
+        wandb.init(
+            project=config.wandb_project,
+            name=run_name,
+            config={
+                "experiment": "mano",
+                "num_layers": num_layers,
+                "loop_count": loop_count,
+                "total_depth": num_layers * loop_count,
+                "n_params": P,
+                "max_ops": config.max_ops,
+                "hidden_size": preset["hidden_size"],
+                "model_preset": config.model_preset,
+                "lr": config.lr,
+                "batch_size": config.batch_size,
+                "train_steps": config.train_steps,
+                "beta_kl": config.beta_kl,
+                "seed": config.seed,
+            },
+            reinit=True,
+        )
 
     # Multi-GPU data parallelism
     n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
@@ -468,6 +500,7 @@ def run_mano_single(
 
     total_micro_steps = config.train_steps * accumulation_steps
     last_loss = float("nan")
+    nan_count = 0
 
     optimizer.zero_grad()
     for step in range(total_micro_steps):
@@ -490,6 +523,15 @@ def run_mano_single(
             )
             loss = loss / accumulation_steps
 
+        # NaN/Inf guard: skip bad batches to prevent poisoning weights
+        if not torch.isfinite(loss):
+            nan_count += 1
+            optimizer.zero_grad()
+            if nan_count % 10 == 1:
+                update = (step + 1) // accumulation_steps
+                print(f"    ⚠ step {update}: NaN/Inf loss detected (count={nan_count}), skipping batch")
+            continue
+
         loss.backward()
 
         if (step + 1) % accumulation_steps == 0:
@@ -509,12 +551,33 @@ def run_mano_single(
                     f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
                 )
 
+                if config.use_wandb:
+                    import wandb
+
+                    log_dict: dict[str, float] = {
+                        "loss": last_loss,
+                        "task_loss": diags["task_loss"].item(),
+                        "entropy": diags["entropy"].item(),
+                        "avg_exit_step": diags["avg_exit_step"].item(),
+                        "lr": scheduler.get_last_lr()[0],
+                        "nan_count": nan_count,
+                    }
+                    for i, v in enumerate(diags["per_step_losses"]):
+                        log_dict[f"loss_step_{i+1}"] = v.item()
+                    wandb.log(log_dict, step=update)
+
     # Evaluate
     accuracy = evaluate_mano(
         model, tokenizer, num_steps=loop_count,
         max_ops=config.max_ops, n_eval=config.n_eval_examples,
         device=device, seed=config.seed + 12345,
     )
+
+    if config.use_wandb:
+        import wandb
+
+        wandb.log({"eval/accuracy": accuracy, "eval/final_loss": last_loss})
+        wandb.finish()
 
     total_depth = num_layers * loop_count
     return ManoResult(

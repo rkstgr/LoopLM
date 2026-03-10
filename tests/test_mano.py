@@ -222,16 +222,16 @@ class TestBlockCausalMask:
         # Upper triangle (excluding diagonal) should be -inf
         for i in range(4):
             for j in range(i + 1, 4):
-                assert mask[0, 0, i, j] == float("-inf")
+                assert mask[0, 0, i, j] <= -1e30
 
     def test_cross_problem_blocked(self):
         """Positions from different problems should not attend to each other."""
         prob_ids = torch.tensor([[0, 0, 1, 1]])
         mask = build_block_causal_mask(prob_ids)
         # Position 2 (problem 1) should not attend to position 0 (problem 0)
-        assert mask[0, 0, 2, 0] == float("-inf")
-        assert mask[0, 0, 3, 0] == float("-inf")
-        assert mask[0, 0, 3, 1] == float("-inf")
+        assert mask[0, 0, 2, 0] <= -1e30
+        assert mask[0, 0, 3, 0] <= -1e30
+        assert mask[0, 0, 3, 1] <= -1e30
 
     def test_same_problem_attends(self):
         """Positions in the same problem with causal order should attend."""

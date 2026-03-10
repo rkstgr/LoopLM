@@ -236,6 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     mano.add_argument("--device", default="auto")
     mano.add_argument("--seed", type=int, default=42)
     mano.add_argument("--output-dir", default="runs/mano")
+    mano.add_argument("--use-wandb", action="store_true", help="Log to wandb")
+    mano.add_argument("--wandb-project", default="looplm")
+    mano.add_argument("--wandb-run-name", default=None, help="wandb run name (auto-generated if omitted)")
 
     # ── mano-collect ─────────────────────────────────────────────────────────
     collect = sub.add_parser(
@@ -311,6 +314,9 @@ def run_mano(args) -> None:
             device=args.device,
             seed=seed,
             output_dir=args.output_dir,
+            use_wandb=args.use_wandb,
+            wandb_project=args.wandb_project,
+            wandb_run_name=args.wandb_run_name,
         )
         results = run_mano_experiment(config)
         all_results.append(results)

@@ -38,6 +38,30 @@ uv run scripts/train.py \
     --output-dir ./checkpoints
 ```
 
+### Mano task
+
+`scripts/mano.slurm` — Rewritten as a SLURM job array:
+  - --array=0-8 runs 9 tasks (3 configs × 3 seeds), each with 1 GPU
+  - Maps SLURM_ARRAY_TASK_ID → (config, seed) using bash arrays
+  - Each task writes to $OUT_DIR/task_<ID>/mano_results.csv
+  - Logs use %A_%a pattern (array job ID + task ID)
+
+  `scripts/analyze.py` — Added mano-collect subcommand:
+  - Reads all */mano_results.csv files from the input directory
+  - Groups by (num_layers, loop_count, total_depth), computes mean ± std
+  - Prints a formatted table and writes mano_results_combined.csv
+
+  Usage:
+  # Submit all 9 jobs in parallel
+  ```bash
+  sbatch scripts/mano.slurm
+  ```
+
+  # After all complete, aggregate results
+  ```bash
+  uv run scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
+  ```
+
 ### JUWELS (westai / H100)
 
 **One-time setup on login node** (needs internet):

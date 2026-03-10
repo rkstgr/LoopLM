@@ -19,14 +19,18 @@ module load uv
 REPO_DIR="${PROJECT}/LoopLM"
 LOG_DIR="${SCRATCH}/looplm/logs"
 OUT_DIR="${SCRATCH}/looplm/mano"
+WANDB_DIR="${SCRATCH}/looplm/wandb"
 
-mkdir -p "$LOG_DIR" "$OUT_DIR"
+mkdir -p "$LOG_DIR" "$OUT_DIR" "$WANDB_DIR"
 
-# ── No HF tokenizer needed for Mano, but keep offline mode in case ──────────
+# ── Offline mode (compute nodes have no internet) ───────────────────────────
 export HF_HOME="${PROJECT}/hf_cache"
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTHONUNBUFFERED=1
+
+export WANDB_MODE=offline
+export WANDB_DIR="$WANDB_DIR"
 
 # ── Configuration ────────────────────────────────────────────────────────────
 MAX_OPS=10
@@ -76,6 +80,9 @@ uv run scripts/analyze.py mano \
     --seq-len            1024                  \
     --log-every          500                   \
     --device             auto                  \
-    --output-dir         "$TASK_OUT_DIR"
+    --output-dir         "$TASK_OUT_DIR"        \
+    --use-wandb                                \
+    --wandb-project      looplm
 
 echo "==> Task ${TASK_ID} complete. Results at ${TASK_OUT_DIR}/mano_results.csv"
+echo "==> To sync wandb: wandb sync ${WANDB_DIR}/offline-run-*"
