@@ -8,8 +8,8 @@ Subcommands:
     mano         — Knowledge Manipulation (Section 6.2): trains models on modular
                    arithmetic tree expressions (mod 23) and compares base vs. looped
                    models at iso-FLOP budgets.
-    mano-collect — Aggregate Mano results from a SLURM job array. Reads per-task
-                   CSVs and prints a combined table with mean ± std across seeds.
+    capo-collect — Aggregate Capo results from a SLURM job array.
+    mano-collect — Aggregate Mano results from a SLURM job array.
 
 Usage:
     # Quick smoke test (tiny N, few exposures)
@@ -81,6 +81,9 @@ def run_capo(args) -> None:
             device=args.device,
             seed=seed,
             output_dir=args.output_dir,
+            use_wandb=args.use_wandb,
+            wandb_project=args.wandb_project,
+            wandb_run_name=args.wandb_run_name,
         )
         results = run_capo_experiment(config)
         all_results.append(results)
@@ -188,6 +191,9 @@ def build_parser() -> argparse.ArgumentParser:
     capo.add_argument("--device", default="auto")
     capo.add_argument("--seed", type=int, default=42)
     capo.add_argument("--output-dir", default="runs/capo")
+    capo.add_argument("--use-wandb", action="store_true", help="Log to wandb")
+    capo.add_argument("--wandb-project", default="looplm")
+    capo.add_argument("--wandb-run-name", default=None, help="wandb run name (auto-generated if omitted)")
 
     # ── mano ──────────────────────────────────────────────────────────────────
     mano = sub.add_parser("mano", help="Knowledge manipulation experiment (Section 6.2)")
@@ -249,6 +255,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--input-dir",
         required=True,
         help="Directory containing task_*/mano_results.csv files",
+    )
+
+    # ── capo-collect ─────────────────────────────────────────────────────────
+    capo_collect = sub.add_parser(
+        "capo-collect",
+        help="Aggregate Capo results from job array output directory",
+    )
+    capo_collect.add_argument(
+        "--input-dir",
+        required=True,
+        help="Directory containing task_*/capo_results.csv files",
     )
 
     return parser
@@ -469,6 +486,103 @@ def run_mano_collect(args) -> None:
     print(f"Combined results saved to {output_path}")
 
 
+def run_capo_collect(args) -> None:
+    import csv
+    import statistics
+    from collections import defaultdict
+
+    input_dir = Path(args.input_dir)
+    if not input_dir.is_dir():
+        print(f"Error: {input_dir} is not a directory")
+        sys.exit(1)
+
+    csv_files = sorted(input_dir.glob("*/capo_results.csv"))
+    if not csv_files:
+        csv_files = sorted(input_dir.glob("capo_result_*.csv"))
+    if not csv_files:
+        print(f"Error: no capo result CSVs found in {input_dir}")
+        sys.exit(1)
+
+    print(f"Found {len(csv_files)} result file(s) in {input_dir}")
+
+    rows: list[dict] = []
+    for csv_file in csv_files:
+        with open(csv_file) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+
+    if not rows:
+        print("Error: no data rows found")
+        sys.exit(1)
+
+    # Group by (model_size, loop_count)
+    groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    for row in rows:
+        key = (row["model_size"], int(row["loop_count"]))
+        groups[key].append(row)
+
+    print()
+    print("=" * 80)
+    print(f"{'CAPO RESULTS — Aggregated across seeds':^80}")
+    print("=" * 80)
+    print(
+        f"  {'Size':<8} {'Params':>8} {'Loop':>5} {'N':>8} {'n':>4} "
+        f"{'bits/param':>16} {'p1':>10} {'p2':>10}"
+    )
+    print("  " + "-" * 76)
+
+    combined_rows: list[dict] = []
+    for key in sorted(groups.keys()):
+        entries = groups[key]
+        n = len(entries)
+        bpp_vals = [float(e["bits_per_param"]) for e in entries]
+        p1_vals = [float(e["p1"]) for e in entries]
+        p2_vals = [float(e["p2"]) for e in entries]
+        bpp_mean = statistics.mean(bpp_vals)
+        bpp_std = statistics.stdev(bpp_vals) if n > 1 else 0.0
+        p1_mean = statistics.mean(p1_vals)
+        p2_mean = statistics.mean(p2_vals)
+
+        model_size, loop_count = key
+        n_params = int(entries[0]["n_params"])
+        n_individuals = int(entries[0]["n_individuals"])
+
+        print(
+            f"  {model_size:<8} {n_params / 1e6:>6.1f}M {loop_count:>5} "
+            f"{n_individuals:>8,} {n:>4} "
+            f"{bpp_mean:>8.4f}±{bpp_std:.4f} {p1_mean:>10.3f} {p2_mean:>10.3f}"
+        )
+
+        combined_rows.append({
+            "model_size": model_size,
+            "n_params": n_params,
+            "loop_count": loop_count,
+            "n_individuals": n_individuals,
+            "n_seeds": n,
+            "bits_per_param_mean": f"{bpp_mean:.6f}",
+            "bits_per_param_std": f"{bpp_std:.6f}",
+            "p1_mean": f"{p1_mean:.6f}",
+            "p2_mean": f"{p2_mean:.6f}",
+        })
+
+    print("=" * 80)
+    print("Expected: bits/param ~ 2.0 for both loop=1 and loop=4")
+    print()
+
+    output_path = input_dir / "capo_results_combined.csv"
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "model_size", "n_params", "loop_count", "n_individuals",
+            "n_seeds", "bits_per_param_mean", "bits_per_param_std",
+            "p1_mean", "p2_mean",
+        ])
+        writer.writeheader()
+        writer.writerows(combined_rows)
+
+    print(f"Combined results saved to {output_path}")
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -479,6 +593,8 @@ def main():
         run_mano(args)
     elif args.command == "mano-collect":
         run_mano_collect(args)
+    elif args.command == "capo-collect":
+        run_capo_collect(args)
     else:
         parser.print_help()
         sys.exit(1)

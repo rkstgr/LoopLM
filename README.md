@@ -156,6 +156,26 @@ tests/                      # 74 tests covering all modules above
 - [ ] Multi-stage training (stage transitions, RoPE base annealing)
 - [ ] Scale to 1.4B / upcycling to 2.6B
 
+## Future Ideas
+
+### Detached recurrence (truncated BPTT)
+Only backprop through the last recurrent step, detaching hidden states between iterations. [HRM](https://arxiv.org/) does this. Eliminates gradient explosion entirely but loses cross-step gradient coordination. Each step still gets a direct loss signal, and since weights are shared, improving one step tends to improve all.
+
+### Diffusion-style step sampling
+Instead of computing all T steps and weighting by the exit distribution, **sample a single recurrent step per batch** and importance-weight the loss. Direct parallel to diffusion training where you sample a random timestep t rather than denoising the full chain.
+
+Relevant diffusion insights that transfer:
+- [Min-SNR](https://arxiv.org/abs/2303.09556) — weight timesteps by clamped signal-to-noise ratio to resolve conflicting gradients between steps (3.4x faster convergence)
+- CLTS — curriculum from uniform to focused Gaussian sampling (easy steps first, hard steps later)
+- [A Closer Look at Time Steps](https://arxiv.org/html/2405.17403v1) — non-uniform timestep sampling for 3x speedup
+
+Looped transformer work already exploring this direction:
+- [LoopFormer](https://loopformer.github.io/) — conditions on internal time t and step size, allowing step-skipping (analogous to DDIM)
+- [Looped Transformers are Better at Learning Learning Algorithms](https://arxiv.org/html/2311.12424v2) — randomly samples iteration count per training batch
+- [Retrofitted Recurrence](https://arxiv.org/html/2511.07384v1) — schedules max backprop depth over training
+
+A curriculum schedule (early recurrence steps first, shift to later steps as training progresses) could both stabilize training and improve sample efficiency.
+
 ## Reference
 
 - Paper: [arXiv:2510.25741v4](https://arxiv.org/abs/2510.25741)

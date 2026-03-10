@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 #SBATCH --job-name=looplm_mano
 #SBATCH --array=0-8
 #SBATCH --output=/p/scratch/westai0047/looplm/logs/%x_%A_%a.out

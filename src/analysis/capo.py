@@ -11,7 +11,8 @@ Usage:
     from src.analysis.capo import BioSGenerator, CapoConfig, run_capo_experiment
 
     config = CapoConfig(n_individuals=1_000, train_exposures=10,
-                        model_sizes=["micro"], loop_counts=[1, 4])
+                        model_sizes=["micro"], loop_counts=[1, 4],
+                        use_wandb=True)
     results = run_capo_experiment(config)
     print_capo_results(results)
 
@@ -472,9 +473,6 @@ def compute_capacity_ratio(
     Returns:
         (bits_per_param, p1, p2) — capacity ratio plus raw losses for diagnostics
     """
-    # Unwrap DataParallel so we can call model() with a plain interface
-    if isinstance(model, torch.nn.DataParallel):
-        model = model.module
     model.eval()
     N = generator.n
     P = sum(p.numel() for p in model.parameters())
@@ -588,6 +586,10 @@ class CapoConfig:
     seed: int = 42
     output_dir: str = "runs/capo"
 
+    use_wandb: bool = False
+    wandb_project: str = "looplm"
+    wandb_run_name: str | None = None
+
 
 @dataclass
 class CapoResult:
@@ -625,18 +627,36 @@ def run_capo_single(
     model = LoopLM(model_config).to(device)
     P = sum(p.numel() for p in model.parameters())
 
-    # Multi-GPU data parallelism: wrap with DataParallel when multiple GPUs are
-    # visible and the device is CUDA.  Scale batch size up by n_gpus so each
-    # GPU still processes the same per-GPU batch size.
-    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
-    if n_gpus > 1:
-        model = torch.nn.DataParallel(model)
-        print(f"    DataParallel: using {n_gpus} GPUs")
+    # wandb init (per run, so each config gets its own run)
+    if config.use_wandb:
+        import wandb
+
+        run_name = config.wandb_run_name or (
+            f"capo_{size_name}_T{loop_count}_s{config.seed}"
+        )
+        wandb.init(
+            project=config.wandb_project,
+            name=run_name,
+            config={
+                "experiment": "capo",
+                "model_size": size_name,
+                "loop_count": loop_count,
+                "n_params": P,
+                "n_individuals": config.n_individuals,
+                "train_exposures": config.train_exposures,
+                "hidden_size": model_config.hidden_size,
+                "num_layers": model_config.num_layers,
+                "lr": config.lr,
+                "batch_size": config.batch_size,
+                "accumulation_steps": config.accumulation_steps,
+                "seq_len": config.seq_len,
+                "seed": config.seed,
+            },
+            reinit=True,
+        )
 
     dataset = BioSTrainDataset(generator, tokenizer, seq_len=config.seq_len)
 
-    # Target batch size from paper is 192.
-    # We use a smaller micro-batch size to fit in memory and accumulate.
     micro_batch_size = config.batch_size
     accumulation_steps = config.accumulation_steps
     effective_batch_size = micro_batch_size * accumulation_steps
@@ -680,10 +700,9 @@ def run_capo_single(
     data_iter = _infinite_iter(dataloader)
     t_start = time.monotonic()
 
-    # Paper uses bf16 training (Appendix B.1)
-    # H100s/A100s provide the best performance with bfloat16.
-    # Autocast handles the mixed-precision scaling for logits and activations.
-    scaler = torch.GradScaler(enabled=False)  # Not needed for bf16 usually
+    last_loss = float("nan")
+    nan_count = 0
+    consecutive_nans = 0
 
     optimizer.zero_grad()
     for step in range(total_steps):
@@ -694,45 +713,81 @@ def run_capo_single(
         x, tgt = tokens[:, :-1], tokens[:, 1:]
         bio_ids_x = bio_ids[:, :-1]
 
-        # Block-causal mask: prevent cross-biography attention
         attn_mask = _build_block_causal_mask(bio_ids_x)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             out = model(x, num_steps=loop_count, attention_mask=attn_mask)
-
-            # LoopLM Stage I multi-step loss: Σ p(t|x) * L(t)
-            # This is the standard training objective for LoopLMs (Paper Eq. 4).
             loss, diags = compute_looplm_loss(
                 logits_per_step=out.logits,
                 exit_lambdas=out.exit_lambdas,
                 targets=tgt,
-                beta=0.1,  # Stage I entropy weight
+                beta=0.1,
             )
-            # Normalize loss for accumulation
             loss = loss / accumulation_steps
 
         loss.backward()
 
         if (step + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            if not torch.isfinite(grad_norm):
+                nan_count += 1
+                consecutive_nans += 1
+                optimizer.zero_grad()
+                if consecutive_nans <= 5 or nan_count % 50 == 0:
+                    update = (step + 1) // accumulation_steps
+                    print(f"    warning: step {update}: non-finite gradients (count={nan_count}), skipping")
+                if consecutive_nans > 10:
+                    update = (step + 1) // accumulation_steps
+                    print(f"    error: step {update}: {consecutive_nans} consecutive NaN updates, stopping early")
+                    break
+            else:
+                consecutive_nans = 0
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                last_loss = loss.item() * accumulation_steps
 
-        if (step + 1) % (
-            config.log_every * accumulation_steps
-        ) == 0 or step + 1 == total_steps:
-            elapsed = time.monotonic() - t_start
-            current_update = (step + 1) // accumulation_steps
-            eta = elapsed / (step + 1) * (total_steps - step - 1)
-            print(
-                f"    update {current_update:5d}/{total_updates}  loss={loss.item() * accumulation_steps:.4f}"
-                f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
-            )
+        update = (step + 1) // accumulation_steps
+        if update % config.log_every == 0 or update == total_updates:
+            if (step + 1) % accumulation_steps == 0:
+                elapsed = time.monotonic() - t_start
+                eta = elapsed / (step + 1) * (total_steps - step - 1)
+                print(
+                    f"    update {update:5d}/{total_updates}  loss={last_loss:.4f}"
+                    f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
+                )
 
+                if config.use_wandb:
+                    import wandb
+
+                    log_dict: dict[str, float] = {
+                        "loss": last_loss,
+                        "task_loss": diags["task_loss"].item(),
+                        "entropy": diags["entropy"].item(),
+                        "avg_exit_step": diags["avg_exit_step"].item(),
+                        "lr": scheduler.get_last_lr()[0],
+                        "nan_count": nan_count,
+                    }
+                    for i, v in enumerate(diags["per_step_losses"]):
+                        log_dict[f"loss_step_{i+1}"] = v.item()
+                    wandb.log(log_dict, step=update)
+
+    # Evaluate capacity
     bits_per_param, p1, p2 = compute_capacity_ratio(
         model, generator, tokenizer, loop_count, device
     )
+
+    if config.use_wandb:
+        import wandb
+
+        wandb.log({
+            "eval/bits_per_param": bits_per_param,
+            "eval/name_loss_nats": p1,
+            "eval/attr_loss_nats": p2,
+            "eval/final_loss": last_loss,
+        })
+        wandb.finish()
+
     return CapoResult(
         model_size=size_name,
         n_params=P,

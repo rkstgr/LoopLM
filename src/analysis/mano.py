@@ -272,8 +272,6 @@ def evaluate_mano(
     Returns:
         Accuracy as a float in [0, 1].
     """
-    if isinstance(model, torch.nn.DataParallel):
-        model = model.module
     model.eval()
 
     rng = random.Random(seed)
@@ -445,12 +443,6 @@ def run_mano_single(
             },
             reinit=True,
         )
-
-    # Multi-GPU data parallelism
-    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 1
-    if n_gpus > 1:
-        model = torch.nn.DataParallel(model)
-        print(f"    DataParallel: using {n_gpus} GPUs")
 
     dataset = ManoDataset(
         tokenizer,
