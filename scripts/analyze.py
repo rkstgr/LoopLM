@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mano.add_argument("--num-seeds", type=int, default=1)
 
-    mano.add_argument("--lr", type=float, default=2e-4)
+    mano.add_argument("--lr", type=float, default=1e-4)
     mano.add_argument("--weight-decay", type=float, default=0.1)
     mano.add_argument("--batch-size", type=int, default=128)
     mano.add_argument("--accumulation-steps", type=int, default=1)

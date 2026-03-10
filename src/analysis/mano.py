@@ -353,7 +353,7 @@ class ManoConfig:
     model_preset: str = "small"  # Key into _MODEL_PRESETS
 
     # Training hyperparams (paper Appendix B.2)
-    lr: float = 2e-4
+    lr: float = 1e-4
     weight_decay: float = 0.1
     beta2: float = 0.98
     eps: float = 1e-6
@@ -501,6 +501,7 @@ def run_mano_single(
     total_micro_steps = config.train_steps * accumulation_steps
     last_loss = float("nan")
     nan_count = 0
+    consecutive_nans = 0
 
     optimizer.zero_grad()
     for step in range(total_micro_steps):
@@ -523,23 +524,27 @@ def run_mano_single(
             )
             loss = loss / accumulation_steps
 
-        # NaN/Inf guard: skip bad batches to prevent poisoning weights
-        if not torch.isfinite(loss):
-            nan_count += 1
-            optimizer.zero_grad()
-            if nan_count % 10 == 1:
-                update = (step + 1) // accumulation_steps
-                print(f"    ⚠ step {update}: NaN/Inf loss detected (count={nan_count}), skipping batch")
-            continue
-
         loss.backward()
 
         if (step + 1) % accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-            last_loss = loss.item() * accumulation_steps
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+            if not torch.isfinite(grad_norm):
+                nan_count += 1
+                consecutive_nans += 1
+                optimizer.zero_grad()
+                if consecutive_nans <= 5 or nan_count % 50 == 0:
+                    update = (step + 1) // accumulation_steps
+                    print(f"    ⚠ step {update}: non-finite gradients (count={nan_count}), skipping update")
+                if consecutive_nans > 10:
+                    update = (step + 1) // accumulation_steps
+                    print(f"    ✗ step {update}: {consecutive_nans} consecutive NaN updates, stopping early")
+                    break
+            else:
+                consecutive_nans = 0
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                last_loss = loss.item() * accumulation_steps
 
         update = (step + 1) // accumulation_steps
         if update % config.log_every == 0 or update == config.train_steps:
