@@ -2,12 +2,14 @@
 """Entry point for LoopLM analysis experiments.
 
 Subcommands:
-    capo    — Knowledge Capacity (Section 6.1): trains 1M–40M models on
-              synthetic biographies and measures bits-of-knowledge per parameter
-              for loop=1 vs loop=4.
-    mano    — Knowledge Manipulation (Section 6.2): trains models on modular
-              arithmetic tree expressions (mod 23) and compares base vs. looped
-              models at iso-FLOP budgets.
+    capo         — Knowledge Capacity (Section 6.1): trains 1M–40M models on
+                   synthetic biographies and measures bits-of-knowledge per parameter
+                   for loop=1 vs loop=4.
+    mano         — Knowledge Manipulation (Section 6.2): trains models on modular
+                   arithmetic tree expressions (mod 23) and compares base vs. looped
+                   models at iso-FLOP budgets.
+    mano-collect — Aggregate Mano results from a SLURM job array. Reads per-task
+                   CSVs and prints a combined table with mean ± std across seeds.
 
 Usage:
     # Quick smoke test (tiny N, few exposures)
@@ -235,6 +237,17 @@ def build_parser() -> argparse.ArgumentParser:
     mano.add_argument("--seed", type=int, default=42)
     mano.add_argument("--output-dir", default="runs/mano")
 
+    # ── mano-collect ─────────────────────────────────────────────────────────
+    collect = sub.add_parser(
+        "mano-collect",
+        help="Aggregate Mano results from job array output directory",
+    )
+    collect.add_argument(
+        "--input-dir",
+        required=True,
+        help="Directory containing task_*/mano_results.csv files",
+    )
+
     return parser
 
 
@@ -348,6 +361,108 @@ def run_mano(args) -> None:
     print(f"Results saved to {results_path}")
 
 
+def run_mano_collect(args) -> None:
+    import csv
+    import statistics
+    from collections import defaultdict
+
+    input_dir = Path(args.input_dir)
+    if not input_dir.is_dir():
+        print(f"Error: {input_dir} is not a directory")
+        sys.exit(1)
+
+    # Collect all mano_results.csv files from subdirectories
+    csv_files = sorted(input_dir.glob("*/mano_results.csv"))
+    if not csv_files:
+        # Also try flat layout
+        csv_files = sorted(input_dir.glob("mano_result_*.csv"))
+    if not csv_files:
+        print(f"Error: no mano result CSVs found in {input_dir}")
+        sys.exit(1)
+
+    print(f"Found {len(csv_files)} result file(s) in {input_dir}")
+
+    # Read all rows
+    rows: list[dict] = []
+    for csv_file in csv_files:
+        with open(csv_file) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+
+    if not rows:
+        print("Error: no data rows found")
+        sys.exit(1)
+
+    # Group by (num_layers, loop_count, total_depth)
+    groups: dict[tuple[int, int, int], list[dict]] = defaultdict(list)
+    for row in rows:
+        key = (int(row["num_layers"]), int(row["loop_count"]), int(row["total_depth"]))
+        groups[key] = groups.get(key, [])
+        groups[key].append(row)
+
+    # Print aggregated table
+    print()
+    print("=" * 80)
+    print(f"{'MANO RESULTS — Aggregated across seeds':^80}")
+    print("=" * 80)
+    print(
+        f"  {'Layers':>6} {'Loop':>5} {'Depth':>6} {'Params':>10} "
+        f"{'max_ops':>8} {'N':>4} {'Accuracy':>16} {'Loss':>14}"
+    )
+    print("  " + "-" * 76)
+
+    combined_rows: list[dict] = []
+    for key in sorted(groups.keys()):
+        entries = groups[key]
+        n = len(entries)
+        acc_vals = [float(e["accuracy"]) for e in entries]
+        loss_vals = [float(e["final_loss"]) for e in entries]
+        acc_mean = statistics.mean(acc_vals)
+        acc_std = statistics.stdev(acc_vals) if n > 1 else 0.0
+        loss_mean = statistics.mean(loss_vals)
+        loss_std = statistics.stdev(loss_vals) if n > 1 else 0.0
+
+        num_layers, loop_count, total_depth = key
+        n_params = int(entries[0]["n_params"])
+        max_ops = int(entries[0]["max_ops"])
+
+        print(
+            f"  {num_layers:>6} {loop_count:>5} {total_depth:>6} "
+            f"{n_params / 1e6:>8.2f}M {max_ops:>8} {n:>4} "
+            f"{acc_mean:>8.4f}±{acc_std:.4f} {loss_mean:>7.4f}±{loss_std:.4f}"
+        )
+
+        combined_rows.append({
+            "num_layers": num_layers,
+            "loop_count": loop_count,
+            "total_depth": total_depth,
+            "n_params": n_params,
+            "max_ops": max_ops,
+            "n_seeds": n,
+            "accuracy_mean": f"{acc_mean:.6f}",
+            "accuracy_std": f"{acc_std:.6f}",
+            "loss_mean": f"{loss_mean:.6f}",
+            "loss_std": f"{loss_std:.6f}",
+        })
+
+    print("=" * 80)
+    print("Expected: looped models outperform non-looped at same total depth")
+    print()
+
+    # Write combined CSV
+    output_path = input_dir / "mano_results_combined.csv"
+    with open(output_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            "num_layers", "loop_count", "total_depth", "n_params", "max_ops",
+            "n_seeds", "accuracy_mean", "accuracy_std", "loss_mean", "loss_std",
+        ])
+        writer.writeheader()
+        writer.writerows(combined_rows)
+
+    print(f"Combined results saved to {output_path}")
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -356,6 +471,8 @@ def main():
         run_capo(args)
     elif args.command == "mano":
         run_mano(args)
+    elif args.command == "mano-collect":
+        run_mano_collect(args)
     else:
         parser.print_help()
         sys.exit(1)
