@@ -101,10 +101,12 @@ uv run scripts/analyze.py mano \
     --seed               "$SEED"               \
     --seq-len            1024                  \
     --log-every          500                   \
+    --checkpoint-every   5000                  \
     --device             auto                  \
     --output-dir         "$TASK_OUT_DIR"        \
     --use-wandb                                \
     --wandb-project      looplm
 
+# To resume after wall-time preemption, just resubmit the same script.
 echo "==> Task ${TASK_ID} complete. Results at ${TASK_OUT_DIR}/mano_results.csv"
 echo "==> To sync wandb: wandb sync ${WANDB_DIR}/offline-run-*"

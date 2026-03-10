@@ -255,6 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
     mano.add_argument("--train-steps", type=int, default=80_000)
     mano.add_argument("--beta-kl", type=float, default=0.1)
     mano.add_argument("--log-every", type=int, default=500)
+    mano.add_argument("--checkpoint-every", type=int, default=5_000,
+                       help="Save checkpoint every N steps (0=disable)")
     mano.add_argument("--device", default="auto")
     mano.add_argument("--seed", type=int, default=42)
     mano.add_argument("--output-dir", default="runs/mano")
@@ -355,6 +357,7 @@ def run_mano(args) -> None:
             train_steps=args.train_steps,
             beta_kl=args.beta_kl,
             log_every=args.log_every,
+            checkpoint_every=args.checkpoint_every,
             device=args.device,
             seed=seed,
             output_dir=args.output_dir,

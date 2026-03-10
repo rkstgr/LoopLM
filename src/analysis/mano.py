@@ -38,9 +38,11 @@ Implementation notes:
 """
 
 import math
+import os
 import random
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -396,6 +398,7 @@ class ManoConfig:
     beta_kl: float = 0.1  # Entropy weight for LoopLM loss
 
     log_every: int = 500
+    checkpoint_every: int = 5_000  # Save checkpoint every N optimizer steps (0=disable)
     device: str = "auto"
     seed: int = 42
     output_dir: str = "runs/mano"
@@ -415,6 +418,35 @@ class ManoResult:
     accuracy: float
     final_loss: float
     lr: float = 1e-4  # LR that produced this result
+
+
+# ── Checkpointing ─────────────────────────────────────────────────────────────
+
+
+def _save_mano_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    step: int,
+    last_loss: float,
+    nan_count: int,
+) -> None:
+    """Save a resumable training checkpoint."""
+    tmp = path.with_suffix(".tmp")
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "step": step,
+            "last_loss": last_loss,
+            "nan_count": nan_count,
+        },
+        tmp,
+    )
+    tmp.rename(path)  # atomic on POSIX
+    print(f"    Checkpoint saved at step {step} → {path}")
 
 
 # ── Single-run training ──────────────────────────────────────────────────────
@@ -519,82 +551,121 @@ def run_mano_single(
 
     from src.training.objectives import compute_looplm_loss
 
-    model.train()
-    data_iter = _infinite_iter(dataloader)
-    t_start = time.monotonic()
+    # ── Checkpoint resume ────────────────────────────────────────────────────
+    ckpt_dir = Path(config.output_dir) / f"ckpt_L{num_layers}_T{loop_count}_lr{config.lr:.0e}_s{config.seed}"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / "checkpoint.pt"
 
-    total_micro_steps = config.train_steps * accumulation_steps
+    start_step = 0  # optimizer steps completed
     last_loss = float("nan")
     nan_count = 0
     consecutive_nans = 0
 
-    optimizer.zero_grad()
-    for step in range(total_micro_steps):
-        tokens, prob_ids = next(data_iter)
-        tokens = tokens.to(device)
-        prob_ids = prob_ids.to(device)
+    if ckpt_path.exists():
+        print(f"    Resuming from {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        start_step = ckpt["step"]
+        last_loss = ckpt.get("last_loss", float("nan"))
+        nan_count = ckpt.get("nan_count", 0)
+        print(f"    Resumed at optimizer step {start_step}/{config.train_steps}")
+        del ckpt
 
-        x, tgt = tokens[:, :-1], tokens[:, 1:]
-        prob_ids_x = prob_ids[:, :-1]
+    if start_step >= config.train_steps:
+        print(f"    Already completed {config.train_steps} steps, skipping to eval")
+    else:
+        # ── Training loop ────────────────────────────────────────────────────
+        model.train()
+        data_iter = _infinite_iter(dataloader)
+        t_start = time.monotonic()
 
-        attn_mask = build_block_causal_mask(prob_ids_x)
+        start_micro = start_step * accumulation_steps
+        total_micro_steps = config.train_steps * accumulation_steps
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            out = model(x, num_steps=loop_count, attention_mask=attn_mask)
-            loss, diags = compute_looplm_loss(
-                logits_per_step=out.logits,
-                exit_lambdas=out.exit_lambdas,
-                targets=tgt,
-                beta=config.beta_kl,
-            )
-            loss = loss / accumulation_steps
+        optimizer.zero_grad()
+        for step in range(start_micro, total_micro_steps):
+            tokens, prob_ids = next(data_iter)
+            tokens = tokens.to(device)
+            prob_ids = prob_ids.to(device)
 
-        loss.backward()
+            x, tgt = tokens[:, :-1], tokens[:, 1:]
+            prob_ids_x = prob_ids[:, :-1]
 
-        if (step + 1) % accumulation_steps == 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-            if not torch.isfinite(grad_norm):
-                nan_count += 1
-                consecutive_nans += 1
-                optimizer.zero_grad()
-                if consecutive_nans <= 5 or nan_count % 50 == 0:
-                    update = (step + 1) // accumulation_steps
-                    print(f"    ⚠ step {update}: non-finite gradients (count={nan_count}), skipping update")
-                if consecutive_nans > 10:
-                    update = (step + 1) // accumulation_steps
-                    print(f"    ✗ step {update}: {consecutive_nans} consecutive NaN updates, stopping early")
-                    break
-            else:
-                consecutive_nans = 0
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                last_loss = loss.item() * accumulation_steps
+            attn_mask = build_block_causal_mask(prob_ids_x)
 
-        update = (step + 1) // accumulation_steps
-        if update % config.log_every == 0 or update == config.train_steps:
-            if (step + 1) % accumulation_steps == 0:
-                elapsed = time.monotonic() - t_start
-                eta = elapsed / (step + 1) * (total_micro_steps - step - 1)
-                print(
-                    f"    step {update:6d}/{config.train_steps}  loss={last_loss:.4f}"
-                    f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = model(x, num_steps=loop_count, attention_mask=attn_mask)
+                loss, diags = compute_looplm_loss(
+                    logits_per_step=out.logits,
+                    exit_lambdas=out.exit_lambdas,
+                    targets=tgt,
+                    beta=config.beta_kl,
                 )
+                loss = loss / accumulation_steps
 
-                if config.use_wandb:
-                    import wandb
+            loss.backward()
 
-                    log_dict: dict[str, float] = {
-                        "loss": last_loss,
-                        "task_loss": diags["task_loss"].item(),
-                        "entropy": diags["entropy"].item(),
-                        "avg_exit_step": diags["avg_exit_step"].item(),
-                        "lr": scheduler.get_last_lr()[0],
-                        "nan_count": nan_count,
-                    }
-                    for i, v in enumerate(diags["per_step_losses"]):
-                        log_dict[f"loss_step_{i+1}"] = v.item()
-                    wandb.log(log_dict, step=update)
+            if (step + 1) % accumulation_steps == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                update = (step + 1) // accumulation_steps
+                if not torch.isfinite(grad_norm):
+                    nan_count += 1
+                    consecutive_nans += 1
+                    optimizer.zero_grad()
+                    if consecutive_nans <= 5 or nan_count % 50 == 0:
+                        print(f"    ⚠ step {update}: non-finite gradients (count={nan_count}), skipping update")
+                    if consecutive_nans > 10:
+                        print(f"    ✗ step {update}: {consecutive_nans} consecutive NaN updates, stopping early")
+                        break
+                else:
+                    consecutive_nans = 0
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    last_loss = loss.item() * accumulation_steps
+
+                # Logging
+                if update % config.log_every == 0 or update == config.train_steps:
+                    elapsed = time.monotonic() - t_start
+                    micro_done = step + 1 - start_micro
+                    micro_left = total_micro_steps - step - 1
+                    eta = elapsed / micro_done * micro_left if micro_done > 0 else 0
+                    print(
+                        f"    step {update:6d}/{config.train_steps}  loss={last_loss:.4f}"
+                        f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
+                    )
+
+                    if config.use_wandb:
+                        import wandb
+
+                        log_dict: dict[str, float] = {
+                            "loss": last_loss,
+                            "task_loss": diags["task_loss"].item(),
+                            "entropy": diags["entropy"].item(),
+                            "avg_exit_step": diags["avg_exit_step"].item(),
+                            "lr": scheduler.get_last_lr()[0],
+                            "nan_count": nan_count,
+                        }
+                        for i, v in enumerate(diags["per_step_losses"]):
+                            log_dict[f"loss_step_{i+1}"] = v.item()
+                        wandb.log(log_dict, step=update)
+
+                # Checkpoint
+                if config.checkpoint_every > 0 and update % config.checkpoint_every == 0:
+                    _save_mano_checkpoint(
+                        ckpt_path, model, optimizer, scheduler,
+                        update, last_loss, nan_count,
+                    )
+
+        # Final checkpoint
+        final_update = config.train_steps
+        if config.checkpoint_every > 0:
+            _save_mano_checkpoint(
+                ckpt_path, model, optimizer, scheduler,
+                final_update, last_loss, nan_count,
+            )
 
     # Evaluate
     accuracy = evaluate_mano(
@@ -669,6 +740,7 @@ def run_mano_experiment(config: ManoConfig) -> list[ManoResult]:
                 train_steps=config.train_steps,
                 beta_kl=config.beta_kl,
                 log_every=config.log_every,
+                checkpoint_every=config.checkpoint_every,
                 device=config.device,
                 seed=config.seed,
                 output_dir=config.output_dir,

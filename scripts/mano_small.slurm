@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=36:00:00
+#SBATCH --time=24:00:00
 #SBATCH --job-name=looplm_mano_small
 #SBATCH --array=0-4
 #SBATCH --output=/p/scratch/westai0047/looplm/logs/%x_%A_%a.out
@@ -57,7 +57,7 @@ uv run scripts/analyze.py mano \
     --n-eval             1000                  \
     --model-preset       paper                 \
     --model-configs      "$CONFIG"             \
-    --train-steps        80000                 \
+    --train-steps        70000                 \
     --batch-size         "$BATCH_SIZE"         \
     --accumulation-steps "$ACCUMULATION"       \
     --lr                 1e-4                  \
@@ -65,9 +65,13 @@ uv run scripts/analyze.py mano \
     --seed               42                    \
     --seq-len            1024                  \
     --log-every          500                   \
+    --checkpoint-every   5000                  \
     --device             auto                  \
     --output-dir         "$TASK_OUT_DIR"        \
     --use-wandb                                \
     --wandb-project      looplm
 
+# To resume after wall-time preemption, just resubmit the same script:
+#   sbatch scripts/mano_small.slurm
+# Completed tasks will skip to eval; incomplete ones resume from checkpoint.
 echo "==> Task ${SLURM_ARRAY_TASK_ID} complete. Results at ${TASK_OUT_DIR}/mano_results.csv"
