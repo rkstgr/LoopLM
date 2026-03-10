@@ -5,6 +5,9 @@ Subcommands:
     capo    — Knowledge Capacity (Section 6.1): trains 1M–40M models on
               synthetic biographies and measures bits-of-knowledge per parameter
               for loop=1 vs loop=4.
+    mano    — Knowledge Manipulation (Section 6.2): trains models on modular
+              arithmetic tree expressions (mod 23) and compares base vs. looped
+              models at iso-FLOP budgets.
 
 Usage:
     # Quick smoke test (tiny N, few exposures)
@@ -18,6 +21,12 @@ Usage:
         --n-individuals 20000 --train-exposures 1000 \
         --model-sizes micro mini small --loop-counts 1 4 \
         --num-seeds 3
+
+    # Mano quick test
+    uv run scripts/analyze.py mano \
+        --max-ops 5 --n-train 10000 --train-steps 500 \
+        --model-preset tiny --model-configs 4:1 2:2 1:4 \
+        --batch-size 16 --seq-len 64
 """
 
 import argparse
@@ -178,7 +187,165 @@ def build_parser() -> argparse.ArgumentParser:
     capo.add_argument("--seed", type=int, default=42)
     capo.add_argument("--output-dir", default="runs/capo")
 
+    # ── mano ──────────────────────────────────────────────────────────────────
+    mano = sub.add_parser("mano", help="Knowledge manipulation experiment (Section 6.2)")
+
+    mano.add_argument(
+        "--max-ops",
+        type=int,
+        default=10,
+        help="Maximum expression tree depth (paper: 10, 16, 24)",
+    )
+    mano.add_argument(
+        "--n-train",
+        type=int,
+        default=500_000,
+        help="Number of training examples to generate",
+    )
+    mano.add_argument(
+        "--n-eval",
+        type=int,
+        default=1_000,
+        help="Number of evaluation examples (hardest difficulty)",
+    )
+    mano.add_argument(
+        "--model-configs",
+        nargs="+",
+        default=["4:1", "2:2", "1:4"],
+        help="Model configs as layers:loops pairs (e.g., 4:1 2:2 1:4)",
+    )
+    mano.add_argument(
+        "--model-preset",
+        default="small",
+        choices=["tiny", "small", "medium", "paper"],
+        help="Model size preset (hidden dim / num heads)",
+    )
+    mano.add_argument("--num-seeds", type=int, default=1)
+
+    mano.add_argument("--lr", type=float, default=2e-4)
+    mano.add_argument("--weight-decay", type=float, default=0.1)
+    mano.add_argument("--batch-size", type=int, default=128)
+    mano.add_argument("--accumulation-steps", type=int, default=1)
+    mano.add_argument("--seq-len", type=int, default=1024)
+    mano.add_argument("--warmup-steps", type=int, default=1_000)
+    mano.add_argument("--train-steps", type=int, default=80_000)
+    mano.add_argument("--beta-kl", type=float, default=0.1)
+    mano.add_argument("--log-every", type=int, default=500)
+    mano.add_argument("--device", default="auto")
+    mano.add_argument("--seed", type=int, default=42)
+    mano.add_argument("--output-dir", default="runs/mano")
+
     return parser
+
+
+# ── Mano subcommand ──────────────────────────────────────────────────────────
+
+
+def _parse_model_configs(config_strs: list[str]) -> list[tuple[int, int]]:
+    """Parse 'layers:loops' strings into (num_layers, loop_count) tuples."""
+    configs = []
+    for s in config_strs:
+        parts = s.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid model config '{s}', expected 'layers:loops'")
+        configs.append((int(parts[0]), int(parts[1])))
+    return configs
+
+
+def run_mano(args) -> None:
+    import statistics
+
+    from src.analysis.mano import (
+        ManoConfig,
+        ManoResult,
+        print_mano_results,
+        run_mano_experiment,
+    )
+
+    model_configs = _parse_model_configs(args.model_configs)
+
+    print(f"Mano experiment")
+    print(f"  Max ops       : {args.max_ops}")
+    print(f"  Train examples: {args.n_train:,}")
+    print(f"  Eval examples : {args.n_eval:,}")
+    print(f"  Model configs : {model_configs}")
+    print(f"  Model preset  : {args.model_preset}")
+    print(f"  Accumulation  : {args.accumulation_steps}")
+    print(f"  Train steps   : {args.train_steps:,}")
+    print(f"  Seeds         : {args.num_seeds}")
+    print(f"  Device        : {args.device}")
+    print()
+
+    all_results: list[list[ManoResult]] = []
+    for seed_idx in range(args.num_seeds):
+        seed = args.seed + seed_idx
+        print(f"--- Seed {seed_idx + 1}/{args.num_seeds} (seed={seed}) ---")
+        config = ManoConfig(
+            max_ops=args.max_ops,
+            n_train_examples=args.n_train,
+            n_eval_examples=args.n_eval,
+            model_configs=model_configs,
+            model_preset=args.model_preset,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            batch_size=args.batch_size,
+            accumulation_steps=args.accumulation_steps,
+            seq_len=args.seq_len,
+            warmup_steps=args.warmup_steps,
+            train_steps=args.train_steps,
+            beta_kl=args.beta_kl,
+            log_every=args.log_every,
+            device=args.device,
+            seed=seed,
+            output_dir=args.output_dir,
+        )
+        results = run_mano_experiment(config)
+        all_results.append(results)
+
+    # Aggregate across seeds
+    if args.num_seeds == 1:
+        final_results = all_results[0]
+        print_mano_results(final_results)
+    else:
+        print("\n" + "=" * 80)
+        print(f"{'MANO RESULTS — Mean ± Std across seeds':^80}")
+        print("=" * 80)
+        n_runs = len(all_results[0])
+        print(
+            f"  {'Layers':>6} {'Loop':>5} {'Depth':>6} {'Params':>10} "
+            f"{'max_ops':>8} {'Accuracy':>16} {'Loss':>8}"
+        )
+        print("  " + "-" * 76)
+        for i in range(n_runs):
+            r0 = all_results[0][i]
+            acc_vals = [all_results[s][i].accuracy for s in range(args.num_seeds)]
+            acc_mean = statistics.mean(acc_vals)
+            acc_std = statistics.stdev(acc_vals) if args.num_seeds > 1 else 0.0
+            loss_mean = statistics.mean(
+                [all_results[s][i].final_loss for s in range(args.num_seeds)]
+            )
+            print(
+                f"  {r0.num_layers:>6} {r0.loop_count:>5} {r0.total_depth:>6} "
+                f"{r0.n_params / 1e6:>8.2f}M {r0.max_ops:>8} "
+                f"{acc_mean:>8.4f}±{acc_std:.4f} {loss_mean:>8.4f}"
+            )
+        print("=" * 80)
+        print("Expected: looped models outperform non-looped at same total depth")
+        print()
+        final_results = all_results[0]
+
+    # Save results
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_path = output_dir / "mano_results.csv"
+    with open(results_path, "w") as f:
+        f.write("num_layers,loop_count,total_depth,n_params,max_ops,accuracy,final_loss\n")
+        for r in final_results:
+            f.write(
+                f"{r.num_layers},{r.loop_count},{r.total_depth},{r.n_params},"
+                f"{r.max_ops},{r.accuracy:.6f},{r.final_loss:.6f}\n"
+            )
+    print(f"Results saved to {results_path}")
 
 
 def main():
@@ -187,6 +354,8 @@ def main():
 
     if args.command == "capo":
         run_capo(args)
+    elif args.command == "mano":
+        run_mano(args)
     else:
         parser.print_help()
         sys.exit(1)

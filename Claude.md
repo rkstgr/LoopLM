@@ -492,7 +492,7 @@ Add a gate_finetune mode to the trainer that:
 
 ### Sprint 6: Analysis Experiments
 
-**6.1 — Capo task** — See `src/analysis/capo.py`: synthetic biographies, 1M-40M param models, bits of knowledge stored.
+**6.1 — Capo task** — See `src/analysis/capo.py`: synthetic biographies, 1M-40M param models, bits of knowledge stored. (WIP)
 
 **6.2 — Mano task** — See `src/analysis/mano.py`: modular arithmetic in prefix notation, mod 23, looped vs. non-looped accuracy.
 
