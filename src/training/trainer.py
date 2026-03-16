@@ -5,8 +5,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 from src.model.config import LoopLMConfig
@@ -81,6 +83,12 @@ class TrainerConfig:
     # Device — "auto" picks cuda > mps > cpu
     device: str = "auto"
 
+    # Gradient accumulation
+    grad_accum_steps: int = 1
+
+    # Mixed precision (bf16)
+    use_amp: bool = True
+
     # Periodic evaluation during training (0 = disabled)
     eval_every: int = 0
     eval_tasks: list[str] = field(default_factory=list)
@@ -91,6 +99,10 @@ class TrainerConfig:
 def _resolve_device(device: str) -> torch.device:
     if device != "auto":
         return torch.device(device)
+    # In DDP, LOCAL_RANK tells us which GPU this process owns
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is not None:
+        return torch.device(f"cuda:{local_rank}")
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -98,8 +110,16 @@ def _resolve_device(device: str) -> torch.device:
     return torch.device("cpu")
 
 
+def _is_distributed() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _is_rank0() -> bool:
+    return not _is_distributed() or dist.get_rank() == 0
+
+
 class Trainer:
-    """Single-GPU training loop for LoopLM (Stage I).
+    """Training loop for LoopLM (Stage I). Supports single-GPU and DDP.
 
     Expects an iterable of token-id batches: each item is a LongTensor of
     shape (B, S+1). The trainer uses tokens[:, :-1] as inputs and tokens[:, 1:]
@@ -110,8 +130,15 @@ class Trainer:
         self.model_config = model_config
         self.config = trainer_config
         self.device = _resolve_device(trainer_config.device)
+        self.rank0 = _is_rank0()
 
         self.model = LoopLM(model_config).to(self.device)
+
+        # Wrap with DDP if distributed
+        if _is_distributed():
+            torch.cuda.set_device(self.device)
+            self.model = DDP(self.model, device_ids=[self.device])
+
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=trainer_config.lr,
@@ -119,6 +146,7 @@ class Trainer:
             weight_decay=trainer_config.weight_decay,
         )
         self.step = 0
+        self._accum_count = 0
 
         # Multi-stage state
         self.stage_idx: int = 0
@@ -129,7 +157,7 @@ class Trainer:
             self.config.max_steps = sum(s.max_steps for s in trainer_config.stages)
             self._apply_stage(trainer_config.stages[0])
 
-        if trainer_config.use_wandb:
+        if trainer_config.use_wandb and self.rank0:
             import wandb
             wandb.init(
                 project=trainer_config.wandb_project,
@@ -139,6 +167,13 @@ class Trainer:
                     "trainer": dataclasses.asdict(trainer_config),
                 },
             )
+
+    @property
+    def raw_model(self) -> LoopLM:
+        """Return the unwrapped model (bypassing DDP wrapper)."""
+        if isinstance(self.model, DDP):
+            return self.model.module
+        return self.model
 
     @property
     def num_recurrent_steps(self) -> int:
@@ -160,16 +195,17 @@ class Trainer:
         self.config.beta_kl = stage.beta_kl
 
         # Update RoPE base
-        self.model.rope.set_base(stage.rope_base)
+        self.raw_model.rope.set_base(stage.rope_base)
 
         # Store schedule info for _update_lr
         self._stage_schedule = (stage.lr_schedule, stage.lr, stage.max_steps)
 
-        print(
-            f"[stage {stage.name}] T={stage.num_recurrent_steps}  β={stage.beta_kl}  "
-            f"lr={lr:.2e}  rope_base={stage.rope_base:.0f}  "
-            f"schedule={stage.lr_schedule}  steps={stage.max_steps}"
-        )
+        if self.rank0:
+            print(
+                f"[stage {stage.name}] T={stage.num_recurrent_steps}  β={stage.beta_kl}  "
+                f"lr={lr:.2e}  rope_base={stage.rope_base:.0f}  "
+                f"schedule={stage.lr_schedule}  steps={stage.max_steps}"
+            )
 
     def _update_lr(self) -> None:
         """Update LR according to current stage schedule (no-op for constant)."""
@@ -199,13 +235,14 @@ class Trainer:
     # ── Core training step ────────────────────────────────────────────────────
 
     def train_step(self, token_ids: Tensor) -> dict:
-        """Run one gradient update.
+        """Run one forward+backward micro-step with gradient accumulation.
 
-        Args:
-            token_ids: (B, S+1) — raw token ids; split internally into input/target
+        When grad_accum_steps > 1, gradients accumulate across calls.
+        The optimizer steps only every grad_accum_steps calls.
 
         Returns:
-            diagnostics dict from compute_looplm_loss
+            diagnostics dict; diag["_stepped"] indicates whether an optimizer
+            step was taken (True) or gradients are still accumulating (False).
         """
         # TensorDataset wraps batches as a list/tuple — unwrap if needed
         if isinstance(token_ids, (list, tuple)):
@@ -215,22 +252,36 @@ class Trainer:
         targets = token_ids[:, 1:]   # (B, S) — next-token targets
 
         self.model.train()
-        out = self.model(x, num_steps=self.num_recurrent_steps)
-        loss, diag = compute_looplm_loss(
-            out.logits, out.exit_lambdas, targets, beta=self.config.beta_kl
+        amp_ctx = (
+            torch.amp.autocast("cuda", dtype=torch.bfloat16)
+            if self.config.use_amp and self.device.type == "cuda"
+            else torch.amp.autocast(self.device.type, enabled=False)
         )
+        with amp_ctx:
+            out = self.model(x, num_steps=self.num_recurrent_steps)
+            loss, diag = compute_looplm_loss(
+                out.logits, out.exit_lambdas, targets, beta=self.config.beta_kl
+            )
 
-        self.optimizer.zero_grad()
-        loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip
-        )
-        self.optimizer.step()
-        self.step += 1
-        self._update_lr()
-        self._maybe_advance_stage()
+        scaled_loss = loss / self.config.grad_accum_steps
+        scaled_loss.backward()
 
-        diag["grad_norm"] = grad_norm.detach()
+        self._accum_count += 1
+        if self._accum_count >= self.config.grad_accum_steps:
+            grad_norm = nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.config.grad_clip
+            )
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self._accum_count = 0
+            self.step += 1
+            self._update_lr()
+            self._maybe_advance_stage()
+            diag["grad_norm"] = grad_norm.detach()
+            diag["_stepped"] = True
+        else:
+            diag["_stepped"] = False
+
         return diag
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -257,13 +308,15 @@ class Trainer:
     # ── Checkpointing ─────────────────────────────────────────────────────────
 
     def save_checkpoint(self) -> Path:
+        if not self.rank0:
+            return Path(self.config.checkpoint_dir) / f"step_{self.step:07d}.pt"
         ckpt_dir = Path(self.config.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         path = ckpt_dir / f"step_{self.step:07d}.pt"
         torch.save(
             {
                 "step": self.step,
-                "model_state_dict": self.model.state_dict(),
+                "model_state_dict": self.raw_model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "model_config": dataclasses.asdict(self.model_config),
                 "trainer_config": dataclasses.asdict(self.config),
@@ -277,7 +330,7 @@ class Trainer:
     def load_checkpoint(self, path: str | Path) -> int:
         """Load checkpoint and return the step it was saved at."""
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.raw_model.load_state_dict(ckpt["model_state_dict"])
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self.step = ckpt["step"]
         self.stage_idx = ckpt.get("stage_idx", 0)
@@ -296,8 +349,9 @@ class Trainer:
         """Evaluate at T=1..max_recurrent_steps; log to wandb; return metrics dict.
 
         Returns an empty dict if eval_tasks is empty or lm-eval is not installed.
+        Only runs on rank 0 in distributed training.
         """
-        if not self.config.eval_tasks:
+        if not self.rank0 or not self.config.eval_tasks:
             return {}
 
         try:
@@ -312,8 +366,9 @@ class Trainer:
 
         tasks = self.config.eval_tasks
         max_T = self.model_config.max_recurrent_steps
+        eval_model = self.raw_model
 
-        self.model.eval()
+        eval_model.eval()
         metrics: dict[str, float] = {}
 
         print(f"\n[eval] step={self.step}  tasks={tasks}  T=1..{max_T}")
@@ -323,7 +378,7 @@ class Trainer:
 
         for T in range(1, max_T + 1):
             wrapper = LoopLMLM(
-                self.model, self._tokenizer, self.device, num_steps=T, batch_size=1
+                eval_model, self._tokenizer, self.device, num_steps=T, batch_size=1
             )
             raw = run_eval(wrapper, tasks, self.config.eval_limit)
             row_parts = []
@@ -348,6 +403,8 @@ class Trainer:
     # ── Logging ───────────────────────────────────────────────────────────────
 
     def _log(self, diag: dict) -> None:
+        if not self.rank0:
+            return
         per_step = diag.get("per_step_losses", [])
         step_loss_str = "  ".join(
             f"t{i+1}:{v.item():.3f}" for i, v in enumerate(per_step)

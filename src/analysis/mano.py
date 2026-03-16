@@ -230,6 +230,60 @@ class ManoDataset(Dataset):
         return self._chunks[idx], self._problem_ids[idx]
 
 
+class ManoOnTheFlyDataset(Dataset):
+    """Generates fresh Mano examples on every access — no memorization possible.
+
+    Each __getitem__ call packs freshly generated examples into a single
+    (seq_len + 1)-token window with unique problem IDs for block-causal masking.
+
+    The ``length`` parameter controls how many windows the DataLoader will draw
+    per "epoch" (it is arbitrary since examples are always fresh).
+    """
+
+    def __init__(
+        self,
+        tokenizer: ManoTokenizer,
+        max_ops: int,
+        seq_len: int = 1024,
+        seed: int = 42,
+        length: int = 10_000,
+    ):
+        self.tokenizer = tokenizer
+        self.max_ops = max_ops
+        self.seq_len = seq_len
+        self.chunk_len = seq_len + 1
+        self.seed = seed
+        self._length = length
+        self._call_count = 0
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
+        # Unique RNG per call — combines seed, idx, and a monotonic counter
+        # so even the same idx in different epochs yields different data
+        self._call_count += 1
+        rng = random.Random((self.seed, idx, self._call_count))
+
+        ids: list[int] = []
+        prob_ids: list[int] = []
+        prob_idx = 0
+
+        while len(ids) < self.chunk_len:
+            num_ops = rng.randint(1, self.max_ops)
+            tokens, _ = generate_mano_example(num_ops, rng)
+            token_ids = self.tokenizer.encode(tokens)
+            token_ids.append(self.tokenizer.eos_token_id)
+            ids.extend(token_ids)
+            prob_ids.extend([prob_idx] * len(token_ids))
+            prob_idx += 1
+
+        return (
+            torch.tensor(ids[: self.chunk_len], dtype=torch.long),
+            torch.tensor(prob_ids[: self.chunk_len], dtype=torch.long),
+        )
+
+
 # ── Block-causal attention mask (same concept as Capo) ───────────────────────
 
 
@@ -403,6 +457,8 @@ class ManoConfig:
     seed: int = 42
     output_dir: str = "runs/mano"
 
+    online_data: bool = False  # Generate fresh examples on the fly (no memorization)
+
     use_wandb: bool = False
     wandb_project: str = "looplm"
     wandb_run_name: str | None = None
@@ -509,13 +565,21 @@ def run_mano_single(
             reinit=True,
         )
 
-    dataset = ManoDataset(
-        tokenizer,
-        n_examples=config.n_train_examples,
-        max_ops=config.max_ops,
-        seq_len=config.seq_len,
-        seed=config.seed,
-    )
+    if config.online_data:
+        dataset = ManoOnTheFlyDataset(
+            tokenizer,
+            max_ops=config.max_ops,
+            seq_len=config.seq_len,
+            seed=config.seed,
+        )
+    else:
+        dataset = ManoDataset(
+            tokenizer,
+            n_examples=config.n_train_examples,
+            max_ops=config.max_ops,
+            seq_len=config.seq_len,
+            seed=config.seed,
+        )
 
     micro_batch_size = config.batch_size
     accumulation_steps = config.accumulation_steps
@@ -632,8 +696,27 @@ def run_mano_single(
                     micro_done = step + 1 - start_micro
                     micro_left = total_micro_steps - step - 1
                     eta = elapsed / micro_done * micro_left if micro_done > 0 else 0
+
+                    # Answer-token diagnostics
+                    with torch.no_grad():
+                        ans_mask = (x == tokenizer.ans_token_id).float()
+                        n_ans = ans_mask.sum().clamp(min=1.0)
+                        final_logits = out.logits[-1]  # (B, S, V)
+                        B_log, S_log = x.shape
+                        per_token_ce = F.cross_entropy(
+                            final_logits.reshape(B_log * S_log, -1).float(),
+                            tgt.reshape(B_log * S_log),
+                            reduction="none",
+                        ).view(B_log, S_log)
+                        ans_loss = (per_token_ce * ans_mask).sum() / n_ans
+                        non_ans_mask = 1.0 - ans_mask
+                        non_ans_loss = (per_token_ce * non_ans_mask).sum() / non_ans_mask.sum().clamp(min=1.0)
+                        preds = final_logits.argmax(dim=-1)
+                        ans_acc = ((preds == tgt).float() * ans_mask).sum() / n_ans
+
                     print(
                         f"    step {update:6d}/{config.train_steps}  loss={last_loss:.4f}"
+                        f"  ans_loss={ans_loss:.4f}  ans_acc={ans_acc:.4f}"
                         f"  elapsed={_fmt_duration(elapsed)}  eta={_fmt_duration(eta)}"
                     )
 
@@ -647,6 +730,9 @@ def run_mano_single(
                             "avg_exit_step": diags["avg_exit_step"].item(),
                             "lr": scheduler.get_last_lr()[0],
                             "nan_count": nan_count,
+                            "ans_loss": ans_loss.item(),
+                            "non_ans_loss": non_ans_loss.item(),
+                            "ans_accuracy": ans_acc.item(),
                         }
                         for i, v in enumerate(diags["per_step_losses"]):
                             log_dict[f"loss_step_{i+1}"] = v.item()
@@ -658,6 +744,19 @@ def run_mano_single(
                         ckpt_path, model, optimizer, scheduler,
                         update, last_loss, nan_count,
                     )
+                    # Evaluate at checkpoint
+                    model.eval()
+                    ckpt_acc = evaluate_mano(
+                        model, tokenizer, num_steps=loop_count,
+                        max_ops=config.max_ops,
+                        n_eval=min(200, config.n_eval_examples),
+                        device=device, seed=config.seed + 12345,
+                    )
+                    model.train()
+                    print(f"    [eval@{update}] accuracy={ckpt_acc:.4f}")
+                    if config.use_wandb:
+                        import wandb
+                        wandb.log({"eval/accuracy": ckpt_acc}, step=update)
 
         # Final checkpoint
         final_update = config.train_steps

@@ -12,6 +12,10 @@ Subcommands:
     mano-collect — Aggregate Mano results from a SLURM job array.
 
 Usage:
+    # Arithmetic exit gate experiment (~5min on single H100)
+    uv run scripts/analyze.py arith \
+        --max-ops 4 --train-steps 5000 --beta-kl 0.5
+
     # Quick smoke test (tiny N, few exposures)
     uv run scripts/analyze.py capo \
         --n-individuals 200 --train-exposures 50 \
@@ -200,6 +204,40 @@ def build_parser() -> argparse.ArgumentParser:
     capo.add_argument("--wandb-project", default="looplm")
     capo.add_argument("--wandb-run-name", default=None, help="wandb run name (auto-generated if omitted)")
 
+    # ── arith ─────────────────────────────────────────────────────────────────
+    arith = sub.add_parser("arith", help="Arithmetic exit gate experiment (fast prototyping)")
+
+    arith.add_argument("--max-ops", type=int, default=4,
+                        help="Maximum number of operations (difficulty levels)")
+    arith.add_argument("--num-recurrent-steps", type=int, default=4,
+                        help="Number of recurrent steps T")
+    arith.add_argument("--hidden-size", type=int, default=256)
+    arith.add_argument("--num-layers", type=int, default=4)
+    arith.add_argument("--num-heads", type=int, default=4)
+    arith.add_argument("--intermediate-size", type=int, default=512)
+    arith.add_argument("--train-steps", type=int, default=5_000)
+    arith.add_argument("--batch-size", type=int, default=128)
+    arith.add_argument("--seq-len", type=int, default=128)
+    arith.add_argument("--lr", type=float, default=1e-3)
+    arith.add_argument("--warmup-steps", type=int, default=500)
+    arith.add_argument("--beta-kl", type=float, default=0.1,
+                        help="Entropy regularization weight")
+    arith.add_argument("--use-mul", action="store_true",
+                        help="Include multiplication as an operator")
+    arith.add_argument("--two-digit", action="store_true",
+                        help="Use two-digit operands (10-99)")
+    arith.add_argument("--extrap-eval", nargs="+", type=int, default=None,
+                        help="Test at these T values after training (extrapolation)")
+    arith.add_argument("--n-eval", type=int, default=500)
+    arith.add_argument("--eval-every", type=int, default=1_000)
+    arith.add_argument("--log-every", type=int, default=100)
+    arith.add_argument("--device", default="auto")
+    arith.add_argument("--seed", type=int, default=42)
+    arith.add_argument("--output-dir", default="runs/arithmetic")
+    arith.add_argument("--use-wandb", action="store_true")
+    arith.add_argument("--wandb-project", default="looplm")
+    arith.add_argument("--wandb-run-name", default=None)
+
     # ── mano ──────────────────────────────────────────────────────────────────
     mano = sub.add_parser("mano", help="Knowledge manipulation experiment (Section 6.2)")
 
@@ -260,6 +298,8 @@ def build_parser() -> argparse.ArgumentParser:
     mano.add_argument("--device", default="auto")
     mano.add_argument("--seed", type=int, default=42)
     mano.add_argument("--output-dir", default="runs/mano")
+    mano.add_argument("--online-data", action="store_true",
+                       help="Generate fresh examples on the fly (no memorization)")
     mano.add_argument("--use-wandb", action="store_true", help="Log to wandb")
     mano.add_argument("--wandb-project", default="looplm")
     mano.add_argument("--wandb-run-name", default=None, help="wandb run name (auto-generated if omitted)")
@@ -361,6 +401,7 @@ def run_mano(args) -> None:
             device=args.device,
             seed=seed,
             output_dir=args.output_dir,
+            online_data=args.online_data,
             use_wandb=args.use_wandb,
             wandb_project=args.wandb_project,
             wandb_run_name=args.wandb_run_name,
@@ -641,12 +682,46 @@ def run_capo_collect(args) -> None:
     print(f"Combined results saved to {output_path}")
 
 
+def run_arith(args) -> None:
+    from src.analysis.arithmetic import ArithConfig, run_arith_experiment
+
+    config = ArithConfig(
+        max_ops=args.max_ops,
+        num_recurrent_steps=args.num_recurrent_steps,
+        use_mul=args.use_mul,
+        two_digit=args.two_digit,
+        hidden_size=args.hidden_size,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        intermediate_size=args.intermediate_size,
+        train_steps=args.train_steps,
+        batch_size=args.batch_size,
+        seq_len=args.seq_len,
+        lr=args.lr,
+        warmup_steps=args.warmup_steps,
+        beta_kl=args.beta_kl,
+        extrap_eval_steps=args.extrap_eval,
+        n_eval=args.n_eval,
+        eval_every=args.eval_every,
+        log_every=args.log_every,
+        device=args.device,
+        seed=args.seed,
+        output_dir=args.output_dir,
+        use_wandb=args.use_wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=args.wandb_run_name,
+    )
+    run_arith_experiment(config)
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
     if args.command == "capo":
         run_capo(args)
+    elif args.command == "arith":
+        run_arith(args)
     elif args.command == "mano":
         run_mano(args)
     elif args.command == "mano-collect":

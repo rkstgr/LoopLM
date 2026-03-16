@@ -1,8 +1,15 @@
 """Data loading and tokenization utilities for LoopLM pre-training."""
 
+import glob
+import os
+import random
+from pathlib import Path
+
+import numpy as np
 import torch
+import torch.distributed as dist
 from torch import Tensor
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, IterableDataset, TensorDataset
 
 
 def make_tokenizer(model_id: str = "HuggingFaceTB/SmolLM2-135M"):
@@ -113,4 +120,87 @@ def make_dataloader(
         shuffle=shuffle,
         drop_last=True,
         collate_fn=_collate,
+    )
+
+
+# ── Pre-tokenized streaming data pipeline ────────────────────────────────────
+
+
+class PreTokenizedDataset(IterableDataset):
+    """Stream fixed-length chunks from pre-tokenized .npy shard files.
+
+    Each shard is a 1-D uint16 array of concatenated, EOS-separated token IDs.
+    The dataset yields (seq_len+1,) LongTensor chunks for next-token prediction.
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        seq_len: int = 4096,
+        shuffle_shards: bool = True,
+        seed: int = 42,
+    ):
+        self.shard_paths = sorted(glob.glob(f"{data_dir}/*.npy"))
+        if not self.shard_paths:
+            raise FileNotFoundError(f"No .npy shards found in {data_dir}")
+        self.chunk_len = seq_len + 1
+        self.shuffle_shards = shuffle_shards
+        self.seed = seed
+
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        shard_paths = list(self.shard_paths)
+        if self.shuffle_shards:
+            rng.shuffle(shard_paths)
+
+        # In DDP, each rank processes a disjoint subset of shards
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank()
+            world_size = dist.get_world_size()
+            shard_paths = shard_paths[rank::world_size]
+
+        remainder = np.array([], dtype=np.uint16)
+
+        for path in shard_paths:
+            shard = np.load(path, mmap_mode="r")
+
+            if len(remainder) > 0:
+                # Need to copy mmap data before concatenating
+                combined = np.concatenate([remainder, np.array(shard)])
+            else:
+                combined = np.array(shard)
+
+            n_chunks = len(combined) // self.chunk_len
+            for i in range(n_chunks):
+                start = i * self.chunk_len
+                chunk = combined[start : start + self.chunk_len]
+                yield torch.from_numpy(chunk.astype(np.int64))
+
+            remainder = combined[n_chunks * self.chunk_len :]
+
+
+def make_pretokenized_dataloader(
+    data_dir: str,
+    seq_len: int = 4096,
+    micro_batch_size: int = 2,
+    num_workers: int = 2,
+    seed: int = 42,
+) -> DataLoader:
+    """Create a streaming DataLoader from pre-tokenized .npy shards."""
+    dataset = PreTokenizedDataset(data_dir, seq_len, seed=seed)
+
+    n_shards = len(dataset.shard_paths)
+    total_bytes = sum(p.stat().st_size for p in map(Path, dataset.shard_paths))
+    approx_tokens = total_bytes // 2  # uint16
+    print(
+        f"Pre-tokenized data: {n_shards} shards, ~{approx_tokens/1e9:.1f}B tokens, "
+        f"seq_len={seq_len}, micro_batch={micro_batch_size}"
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=micro_batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
     )

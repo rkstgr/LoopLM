@@ -3,6 +3,7 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from src.model.config import LoopLMConfig
 from src.model.rope import RotaryEmbedding
@@ -72,6 +73,8 @@ class LoopLM(nn.Module):
             base=config.rope_base,
         )
 
+        self.gradient_checkpointing = False
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -112,10 +115,18 @@ class LoopLM(nn.Module):
         logits_per_step: list[Tensor] = []
         exit_lambdas: list[Tensor] = []
 
+        use_ckpt = self.training and self.gradient_checkpointing
+
         for _ in range(num_steps):
             # Apply the full layer stack (shared weights reused each step)
             for layer in self.layers:
-                h = layer(h, cos, sin, attention_mask)
+                if use_ckpt:
+                    h = checkpoint(
+                        layer, h, cos, sin, attention_mask,
+                        use_reentrant=False,
+                    )
+                else:
+                    h = layer(h, cos, sin, attention_mask)
 
             # LM head output
             logits = self.lm_head(self.final_norm(h))  # (B, S, vocab_size)
