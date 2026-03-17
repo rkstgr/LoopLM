@@ -411,6 +411,12 @@ class ArithConfig:
     eps: float = 1e-6
     grad_clip: float = 1.0
     beta_kl: float = 0.1  # Entropy regularization weight
+    detach_between_steps: bool = False  # 1-step gradient approx (HRM-style)
+    deep_supervision: bool = False  # HRM-style: M segments, each with own optimizer step
+    num_segments: int = 1  # M: number of deep supervision segments per training step
+    use_postnorm: bool = False  # Post-norm instead of sandwich norm
+    use_lecun_init: bool = False  # Truncated LeCun normal init
+    use_adam_atan2: bool = False  # Scale-invariant Adam variant
 
     # Evaluation
     n_eval: int = 500
@@ -431,6 +437,58 @@ class ArithConfig:
 # ── Training ─────────────────────────────────────────────────────────────────
 
 
+def _deep_supervision_step(
+    model: LoopLM,
+    x: Tensor,
+    tgt: Tensor,
+    attn_mask: Tensor,
+    config: "ArithConfig",
+    optimizer,
+    compute_loss_fn,
+) -> tuple[float, dict]:
+    """HRM-style deep supervision: M segments, each with own optimizer step.
+
+    Each segment runs T recurrent steps. Between segments, the hidden state is
+    detached. Each segment gets its own loss computation and optimizer step.
+    """
+    B, S = x.shape
+    cos, sin = model.rope.get_cos_sin(S, x.device)
+
+    h = model.embed(x)
+    last_diags: dict = {}
+    total_grad_norm = 0.0
+
+    for seg in range(config.num_segments):
+        if seg > 0:
+            h = h.detach()
+
+        logits_per_step: list[Tensor] = []
+        exit_lambdas: list[Tensor] = []
+        for _ in range(config.num_recurrent_steps):
+            for layer in model.layers:
+                h = layer(h, cos, sin, attn_mask)
+            logits = model.lm_head(model.final_norm(h))
+            lam = torch.sigmoid(model.exit_gate(h)).squeeze(-1)
+            logits_per_step.append(logits)
+            exit_lambdas.append(lam)
+
+        loss, diags = compute_loss_fn(
+            logits_per_step=logits_per_step,
+            exit_lambdas=exit_lambdas,
+            targets=tgt,
+            beta=config.beta_kl,
+        )
+
+        optimizer.zero_grad()
+        loss.backward()
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+        optimizer.step()
+        total_grad_norm += gn.item()
+        last_diags = diags
+
+    return total_grad_norm / config.num_segments, last_diags
+
+
 def run_arith_experiment(config: ArithConfig) -> None:
     """Run the full arithmetic experiment: train + evaluate exit times."""
     device = _resolve_device(config.device)
@@ -447,7 +505,7 @@ def run_arith_experiment(config: ArithConfig) -> None:
     )
 
     torch.manual_seed(config.seed)
-    model = LoopLM(model_config).to(device)
+    model = LoopLM(model_config, use_postnorm=config.use_postnorm, use_lecun_init=config.use_lecun_init).to(device)
     P = sum(p.numel() for p in model.parameters())
 
     print(f"Arithmetic exit gate experiment")
@@ -457,9 +515,24 @@ def run_arith_experiment(config: ArithConfig) -> None:
     if config.two_digit:
         variant.append("2digit")
     variant_str = f"  variant={'|'.join(variant)}" if variant else ""
-    print(f"  max_ops={config.max_ops}  T={config.num_recurrent_steps}  beta_kl={config.beta_kl}{variant_str}")
+    flags = []
+    if config.detach_between_steps:
+        flags.append("detach")
+    if config.deep_supervision:
+        flags.append(f"deepsup(M={config.num_segments})")
+    if config.use_postnorm:
+        flags.append("postnorm")
+    if config.use_lecun_init:
+        flags.append("lecun")
+    if config.use_adam_atan2:
+        flags.append("adam_atan2")
+    flags_str = f"  [{', '.join(flags)}]" if flags else ""
+    print(f"  max_ops={config.max_ops}  T={config.num_recurrent_steps}  beta_kl={config.beta_kl}{variant_str}{flags_str}")
     print(f"  model: h={config.hidden_size}  L={config.num_layers}  params={P:,}")
     print(f"  training: {config.train_steps} steps  bs={config.batch_size}  lr={config.lr}")
+    if config.deep_supervision:
+        total_T = config.num_segments * config.num_recurrent_steps
+        print(f"  deep supervision: M={config.num_segments} segments x T={config.num_recurrent_steps} steps = {total_T} total")
     print(f"  device: {device}")
     print()
 
@@ -482,6 +555,12 @@ def run_arith_experiment(config: ArithConfig) -> None:
                 "beta_kl": config.beta_kl,
                 "use_mul": config.use_mul,
                 "two_digit": config.two_digit,
+                "detach_between_steps": config.detach_between_steps,
+                "deep_supervision": config.deep_supervision,
+                "num_segments": config.num_segments,
+                "use_postnorm": config.use_postnorm,
+                "use_lecun_init": config.use_lecun_init,
+                "use_adam_atan2": config.use_adam_atan2,
                 "seed": config.seed,
             },
         )
@@ -499,13 +578,22 @@ def run_arith_experiment(config: ArithConfig) -> None:
         dataset, batch_size=config.batch_size, shuffle=True, drop_last=True
     )
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.lr,
-        betas=(0.9, config.beta2),
-        eps=config.eps,
-        weight_decay=config.weight_decay,
-    )
+    if config.use_adam_atan2:
+        from src.training.adam_atan2 import AdamAtan2
+        optimizer = AdamAtan2(
+            model.parameters(),
+            lr=config.lr,
+            betas=(0.9, config.beta2),
+            weight_decay=config.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.lr,
+            betas=(0.9, config.beta2),
+            eps=config.eps,
+            weight_decay=config.weight_decay,
+        )
 
     warmup = min(config.warmup_steps, config.train_steps // 10)
 
@@ -534,21 +622,29 @@ def run_arith_experiment(config: ArithConfig) -> None:
         prob_ids_x = prob_ids[:, :-1]
         attn_mask = build_block_causal_mask(prob_ids_x)
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            out = model(x, num_steps=config.num_recurrent_steps, attention_mask=attn_mask)
-            loss, diags = compute_looplm_loss(
-                logits_per_step=out.logits,
-                exit_lambdas=out.exit_lambdas,
-                targets=tgt,
-                beta=config.beta_kl,
-            )
+        if config.deep_supervision:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                grad_norm, diags = _deep_supervision_step(
+                    model, x, tgt, attn_mask, config, optimizer, compute_looplm_loss,
+                )
+            scheduler.step()
+            step += 1
+        else:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = model(x, num_steps=config.num_recurrent_steps, attention_mask=attn_mask, detach_between_steps=config.detach_between_steps)
+                loss, diags = compute_looplm_loss(
+                    logits_per_step=out.logits,
+                    exit_lambdas=out.exit_lambdas,
+                    targets=tgt,
+                    beta=config.beta_kl,
+                )
 
-        optimizer.zero_grad()
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
-        optimizer.step()
-        scheduler.step()
-        step += 1
+            optimizer.zero_grad()
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip).item()
+            optimizer.step()
+            scheduler.step()
+            step += 1
 
         # Logging
         if step % config.log_every == 0:
@@ -558,11 +654,7 @@ def run_arith_experiment(config: ArithConfig) -> None:
             per_step = diags.get("per_step_losses", [])
             step_str = "  ".join(f"t{i+1}:{v.item():.3f}" for i, v in enumerate(per_step))
 
-            # Answer-token accuracy (on this batch)
-            with torch.no_grad():
-                eq_mask = (x == tokenizer.eq_token_id).float()
-                final_logits = out.logits[-1]
-                preds = final_logits.argmax(dim=-1)
+            gn = grad_norm if isinstance(grad_norm, float) else grad_norm
 
             print(
                 f"  step {step:5d}/{config.train_steps}  "
@@ -570,7 +662,7 @@ def run_arith_experiment(config: ArithConfig) -> None:
                 f"task={diags['task_loss'].item():.4f}  "
                 f"ent={diags['entropy'].item():.4f}  "
                 f"exit={diags['avg_exit_step'].item():.2f}  "
-                f"gnorm={grad_norm.item():.3f}  "
+                f"gnorm={gn:.3f}  "
                 f"{step_str}  "
                 f"[{_fmt_duration(elapsed)}/{_fmt_duration(elapsed + eta)}]"
             )
@@ -583,7 +675,7 @@ def run_arith_experiment(config: ArithConfig) -> None:
                     "task_loss": diags["task_loss"].item(),
                     "entropy": diags["entropy"].item(),
                     "avg_exit_step": diags["avg_exit_step"].item(),
-                    "grad_norm": grad_norm.item(),
+                    "grad_norm": gn,
                     "lr": scheduler.get_last_lr()[0],
                 }
                 for i, v in enumerate(per_step):

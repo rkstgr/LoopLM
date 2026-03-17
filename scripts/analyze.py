@@ -226,6 +226,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Include multiplication as an operator")
     arith.add_argument("--two-digit", action="store_true",
                         help="Use two-digit operands (10-99)")
+    arith.add_argument("--detach-between-steps", action="store_true",
+                        help="Detach hidden state between recurrent steps (1-step gradient)")
+    arith.add_argument("--deep-supervision", action="store_true",
+                        help="HRM-style deep supervision: M segments with separate optimizer steps")
+    arith.add_argument("--num-segments", type=int, default=1,
+                        help="Number of deep supervision segments M (each runs T steps)")
+    arith.add_argument("--use-postnorm", action="store_true",
+                        help="Post-norm transformer blocks (HRM-style)")
+    arith.add_argument("--use-lecun-init", action="store_true",
+                        help="Truncated LeCun Normal initialization (HRM-style)")
+    arith.add_argument("--use-adam-atan2", action="store_true",
+                        help="Adam-atan2 scale-invariant optimizer (HRM-style)")
     arith.add_argument("--extrap-eval", nargs="+", type=int, default=None,
                         help="Test at these T values after training (extrapolation)")
     arith.add_argument("--n-eval", type=int, default=500)
@@ -700,6 +712,12 @@ def run_arith(args) -> None:
         lr=args.lr,
         warmup_steps=args.warmup_steps,
         beta_kl=args.beta_kl,
+        detach_between_steps=args.detach_between_steps,
+        deep_supervision=args.deep_supervision,
+        num_segments=args.num_segments,
+        use_postnorm=args.use_postnorm,
+        use_lecun_init=args.use_lecun_init,
+        use_adam_atan2=args.use_adam_atan2,
         extrap_eval_steps=args.extrap_eval,
         n_eval=args.n_eval,
         eval_every=args.eval_every,

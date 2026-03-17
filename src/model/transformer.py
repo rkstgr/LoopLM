@@ -103,3 +103,36 @@ class TransformerBlock(nn.Module):
         # FFN with sandwich norm
         x = x + self.post_ffn_norm(self.ffn(self.pre_ffn_norm(x)))
         return x
+
+
+class PostNormTransformerBlock(nn.Module):
+    """Decoder transformer block with post-normalization (HRM-style).
+
+    Post-norm applies RMSNorm after the residual addition:
+        x = norm(x + sublayer(x))
+
+    HRM excludes scale/bias from RMSNorm (just normalization, no learnable params).
+    """
+
+    def __init__(self, config: LoopLMConfig):
+        super().__init__()
+        self.attn = MultiHeadAttention(config.hidden_size, config.num_heads)
+        self.attn_norm = RMSNorm(config.hidden_size)
+
+        self.ffn = SwiGLUFFN(config.hidden_size, config.intermediate_size)
+        self.ffn_norm = RMSNorm(config.hidden_size)
+
+        # HRM removes learnable scale from norms
+        self.attn_norm.weight.requires_grad_(False)
+        self.ffn_norm.weight.requires_grad_(False)
+
+    def forward(
+        self,
+        x: Tensor,
+        cos: Tensor,
+        sin: Tensor,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
+        x = self.attn_norm(x + self.attn(x, cos, sin, attn_mask))
+        x = self.ffn_norm(x + self.ffn(x))
+        return x

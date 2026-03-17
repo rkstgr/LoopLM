@@ -7,7 +7,7 @@ from torch.utils.checkpoint import checkpoint
 
 from src.model.config import LoopLMConfig
 from src.model.rope import RotaryEmbedding
-from src.model.transformer import RMSNorm, TransformerBlock
+from src.model.transformer import RMSNorm, TransformerBlock, PostNormTransformerBlock
 
 
 class LoopLMOutput(NamedTuple):
@@ -52,13 +52,14 @@ class LoopLM(nn.Module):
     after every recurrent step.
     """
 
-    def __init__(self, config: LoopLMConfig):
+    def __init__(self, config: LoopLMConfig, use_postnorm: bool = False, use_lecun_init: bool = False):
         super().__init__()
         self.config = config
 
         self.embed = nn.Embedding(config.vocab_size, config.hidden_size)
+        block_cls = PostNormTransformerBlock if use_postnorm else TransformerBlock
         self.layers = nn.ModuleList(
-            [TransformerBlock(config) for _ in range(config.num_layers)]
+            [block_cls(config) for _ in range(config.num_layers)]
         )
         self.final_norm = RMSNorm(config.hidden_size)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -75,7 +76,10 @@ class LoopLM(nn.Module):
 
         self.gradient_checkpointing = False
 
-        self._init_weights()
+        if use_lecun_init:
+            self._init_weights_lecun()
+        else:
+            self._init_weights()
 
     def _init_weights(self) -> None:
         std = 0.02
@@ -87,11 +91,27 @@ class LoopLM(nn.Module):
                 if p.dim() >= 2:
                     nn.init.normal_(p, mean=0.0, std=std)
 
+    def _init_weights_lecun(self) -> None:
+        """Truncated LeCun Normal init (HRM-style): std = 1/sqrt(fan_in), truncated at 2σ."""
+        import math
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                fan_in = module.weight.shape[1]
+                std = 1.0 / math.sqrt(fan_in)
+                nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                fan_in = module.embedding_dim
+                std = 1.0 / math.sqrt(fan_in)
+                nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
+
     def forward(
         self,
         input_ids: Tensor,
         num_steps: int | None = None,
         attention_mask: Tensor | None = None,
+        detach_between_steps: bool = False,
     ) -> LoopLMOutput:
         """
         Args:
@@ -100,6 +120,9 @@ class LoopLM(nn.Module):
             attention_mask: optional (B, 1, S, S) additive float mask passed to every
                             attention layer.  0.0 = attend, -inf = blocked.
                             When None, standard causal masking is used.
+            detach_between_steps: if True, detach hidden state between recurrent steps
+                            (1-step gradient approximation, O(1) memory). Only the last
+                            step's hidden state carries gradients to the layer stack.
 
         Returns:
             LoopLMOutput with logits and exit_lambdas for each step
@@ -118,6 +141,9 @@ class LoopLM(nn.Module):
         use_ckpt = self.training and self.gradient_checkpointing
 
         for _ in range(num_steps):
+            if detach_between_steps:
+                h = h.detach()
+
             # Apply the full layer stack (shared weights reused each step)
             for layer in self.layers:
                 if use_ckpt:
