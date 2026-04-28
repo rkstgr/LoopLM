@@ -35,6 +35,15 @@ def parse_args():
     # Model
     p.add_argument("--model-config", default="small",
                    choices=["small", "ouro_1_4b", "ouro_2_6b"])
+    # Model config overrides (applied after loading preset)
+    p.add_argument("--hidden-size", type=int, default=None)
+    p.add_argument("--num-layers", type=int, default=None)
+    p.add_argument("--num-heads", type=int, default=None)
+    p.add_argument("--intermediate-size", type=int, default=None)
+    # Ablation flags
+    p.add_argument("--use-q-act", action="store_true")
+    p.add_argument("--q-weight", type=float, default=0.1)
+    p.add_argument("--q-gamma", type=float, default=0.99)
 
     # Data
     p.add_argument("--dataset", default="wikitext")
@@ -91,14 +100,25 @@ def parse_args():
     return p.parse_args()
 
 
-def build_model_config(name: str, seq_len: int) -> LoopLMConfig:
+def build_model_config(args) -> LoopLMConfig:
     configs = {
         "small": LoopLMConfig.small(),
         "ouro_1_4b": LoopLMConfig.ouro_1_4b(),
         "ouro_2_6b": LoopLMConfig.ouro_2_6b(),
     }
-    cfg = configs[name]
-    cfg.max_seq_len = seq_len
+    cfg = configs[args.model_config]
+    cfg.max_seq_len = args.seq_len
+    # Apply overrides
+    if args.hidden_size is not None:
+        cfg.hidden_size = args.hidden_size
+    if args.num_layers is not None:
+        cfg.num_layers = args.num_layers
+    if args.num_heads is not None:
+        cfg.num_heads = args.num_heads
+    if args.intermediate_size is not None:
+        cfg.intermediate_size = args.intermediate_size
+    if args.num_recurrent_steps is not None:
+        cfg.max_recurrent_steps = args.num_recurrent_steps
     return cfg
 
 
@@ -188,7 +208,7 @@ def main():
         rank = dist.get_rank()
         world_size = dist.get_world_size()
 
-    model_cfg = build_model_config(args.model_config, args.seq_len)
+    model_cfg = build_model_config(args)
     eval_tasks = [t.strip() for t in args.eval_tasks.split(",") if t.strip()]
 
     # Build multi-stage list (each non-zero step value enables that stage)
@@ -222,12 +242,25 @@ def main():
         eval_tasks=eval_tasks,
         eval_limit=args.eval_limit,
         tokenizer_id=args.tokenizer_id,
+        q_weight=args.q_weight,
+        q_gamma=args.q_gamma,
     )
+
+    # Model kwargs for ablation flags
+    model_kwargs = {}
+    if args.use_q_act:
+        model_kwargs["use_q_act"] = True
 
     n_params = model_cfg.num_parameters()
     eff_batch_tokens = args.batch_size * args.grad_accum_steps * args.seq_len * world_size
     if rank == 0:
-        print(f"Model: {args.model_config}  ({n_params/1e6:.1f}M params)")
+        overrides = []
+        if args.hidden_size: overrides.append(f"h={args.hidden_size}")
+        if args.num_layers: overrides.append(f"L={args.num_layers}")
+        if args.num_recurrent_steps: overrides.append(f"T={args.num_recurrent_steps}")
+        if args.use_q_act: overrides.append("Q-ACT")
+        override_str = f" [{', '.join(overrides)}]" if overrides else ""
+        print(f"Model: {args.model_config}{override_str}  ({n_params/1e6:.1f}M params)")
         if distributed:
             print(f"Distributed: {world_size} GPUs (DDP)")
         if stages:
@@ -262,7 +295,7 @@ def main():
             max_chunks=args.max_chunks,
         )
 
-    trainer = Trainer(model_cfg, trainer_cfg)
+    trainer = Trainer(model_cfg, trainer_cfg, model_kwargs=model_kwargs)
     num_steps = args.num_recurrent_steps or model_cfg.max_recurrent_steps
 
     if args.gradient_checkpointing:

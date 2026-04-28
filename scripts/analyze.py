@@ -238,6 +238,31 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Truncated LeCun Normal initialization (HRM-style)")
     arith.add_argument("--use-adam-atan2", action="store_true",
                         help="Adam-atan2 scale-invariant optimizer (HRM-style)")
+    # H/L split (Ablation 3)
+    arith.add_argument("--use-hl-split", action="store_true",
+                        help="H/L module split: slow H layers + fast L inner loop")
+    arith.add_argument("--n-h-layers", type=int, default=2,
+                        help="Number of H (slow) layers in H/L split")
+    arith.add_argument("--t-inner", type=int, default=2,
+                        help="L inner loop steps in H/L split")
+    arith.add_argument("--t-outer", type=int, default=2,
+                        help="H outer loop steps in H/L split")
+    # Q-learning ACT (Ablation 5)
+    arith.add_argument("--use-q-act", action="store_true",
+                        help="Q-learning ACT: replace exit gate with Q-head")
+    arith.add_argument("--q-weight", type=float, default=0.1,
+                        help="Weight for Q-learning loss")
+    arith.add_argument("--q-gamma", type=float, default=0.99,
+                        help="Discount factor for Q-learning TD targets")
+    # MoE-layer recurrence (Ablation 6)
+    arith.add_argument("--use-moe-recurrence", action="store_true",
+                        help="MoE-layer recurrence: route to expert layers per step")
+    arith.add_argument("--num-expert-layers", type=int, default=4,
+                        help="Number of expert TransformerBlocks")
+    arith.add_argument("--moe-top-k", type=int, default=2,
+                        help="Experts activated per token")
+    arith.add_argument("--moe-load-balance-weight", type=float, default=0.01,
+                        help="Load balancing loss weight for MoE")
     arith.add_argument("--extrap-eval", nargs="+", type=int, default=None,
                         help="Test at these T values after training (extrapolation)")
     arith.add_argument("--n-eval", type=int, default=500)
@@ -718,6 +743,17 @@ def run_arith(args) -> None:
         use_postnorm=args.use_postnorm,
         use_lecun_init=args.use_lecun_init,
         use_adam_atan2=args.use_adam_atan2,
+        use_hl_split=args.use_hl_split,
+        n_h_layers=args.n_h_layers,
+        t_inner=args.t_inner,
+        t_outer=args.t_outer,
+        use_q_act=args.use_q_act,
+        q_weight=args.q_weight,
+        q_gamma=args.q_gamma,
+        use_moe_recurrence=args.use_moe_recurrence,
+        num_expert_layers=args.num_expert_layers,
+        moe_top_k=args.moe_top_k,
+        moe_load_balance_weight=args.moe_load_balance_weight,
         extrap_eval_steps=args.extrap_eval,
         n_eval=args.n_eval,
         eval_every=args.eval_every,

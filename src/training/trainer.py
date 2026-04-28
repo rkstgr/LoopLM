@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
-from src.training.objectives import compute_adaptive_gate_loss, compute_looplm_loss
+from src.training.objectives import compute_adaptive_gate_loss, compute_looplm_loss, compute_q_act_loss
 
 
 @dataclass
@@ -89,6 +89,10 @@ class TrainerConfig:
     # Mixed precision (bf16)
     use_amp: bool = True
 
+    # Q-ACT parameters (only used when model has use_q_act=True)
+    q_weight: float = 0.1
+    q_gamma: float = 0.99
+
     # Periodic evaluation during training (0 = disabled)
     eval_every: int = 0
     eval_tasks: list[str] = field(default_factory=list)
@@ -126,13 +130,15 @@ class Trainer:
     as next-token prediction targets.
     """
 
-    def __init__(self, model_config: LoopLMConfig, trainer_config: TrainerConfig):
+    def __init__(self, model_config: LoopLMConfig, trainer_config: TrainerConfig,
+                 model_kwargs: dict | None = None):
         self.model_config = model_config
         self.config = trainer_config
         self.device = _resolve_device(trainer_config.device)
         self.rank0 = _is_rank0()
 
-        self.model = LoopLM(model_config).to(self.device)
+        model_kwargs = model_kwargs or {}
+        self.model = LoopLM(model_config, **model_kwargs).to(self.device)
 
         # Wrap with DDP if distributed
         if _is_distributed():
@@ -259,9 +265,17 @@ class Trainer:
         )
         with amp_ctx:
             out = self.model(x, num_steps=self.num_recurrent_steps)
-            loss, diag = compute_looplm_loss(
-                out.logits, out.exit_lambdas, targets, beta=self.config.beta_kl
-            )
+            if out.q_values is not None:
+                loss, diag = compute_q_act_loss(
+                    out.logits, out.q_values, out.exit_lambdas, targets,
+                    beta=self.config.beta_kl,
+                    q_weight=self.config.q_weight,
+                    q_gamma=self.config.q_gamma,
+                )
+            else:
+                loss, diag = compute_looplm_loss(
+                    out.logits, out.exit_lambdas, targets, beta=self.config.beta_kl
+                )
 
         scaled_loss = loss / self.config.grad_accum_steps
         scaled_loss.backward()

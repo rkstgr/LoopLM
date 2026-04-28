@@ -165,3 +165,122 @@ def compute_adaptive_gate_loss(
     }
 
     return total_loss, diagnostics
+
+
+def compute_q_act_loss(
+    logits_per_step: list[Tensor],
+    q_values_per_step: list[Tensor],
+    exit_lambdas: list[Tensor],
+    targets: Tensor,
+    beta: float = 0.1,
+    q_weight: float = 0.1,
+    q_gamma: float = 0.99,
+    ignore_index: int = -100,
+) -> tuple[Tensor, dict[str, Tensor | float]]:
+    """Q-learning ACT loss: task loss + TD-error on Q(halt)/Q(continue).
+
+    The Q-head learns to predict the value of halting vs continuing.
+    Reward at step t = improvement in CE: r_t = CE_{t-1} - CE_t
+    Q(halt, t)     target = r_t  (halt: collect reward, stop)
+    Q(continue, t) target = r_t + gamma * max(Q(halt,t+1), Q(cont,t+1))
+
+    The task loss uses standard entropy-regularized exit distribution.
+
+    Args:
+        logits_per_step: T tensors of (B, S, V)
+        q_values_per_step: T tensors of (B, S, 2) — [Q(halt), Q(continue)]
+        exit_lambdas: T tensors of (B, S) — still used for task loss weighting
+        targets: (B, S)
+        beta: entropy reg weight for task loss
+        q_weight: weight for Q-learning loss relative to task loss
+        q_gamma: discount factor for TD targets
+        ignore_index: padding token id
+    """
+    T = len(logits_per_step)
+    B, S, V = logits_per_step[0].shape
+
+    # ── Per-step CE losses ────────────────────────────────────────────────────
+    ce_per_step: list[Tensor] = []
+    for logits in logits_per_step:
+        ce = F.cross_entropy(
+            logits.reshape(B * S, V),
+            targets.reshape(B * S),
+            ignore_index=ignore_index,
+            reduction="none",
+        ).view(B, S)
+        ce_per_step.append(ce)
+
+    # ── Standard task loss (same as compute_looplm_loss) ──────────────────────
+    exit_probs = compute_exit_distribution(exit_lambdas)
+    mask = (targets != ignore_index).float()
+    n_valid = mask.sum().clamp(min=1.0)
+
+    ce_stack = torch.stack(ce_per_step, dim=0)
+    weighted_ce = (exit_probs * ce_stack).sum(dim=0)
+    task_loss = (weighted_ce * mask).sum() / n_valid
+
+    log_probs = torch.log(exit_probs.clamp(min=1e-10))
+    entropy = -(exit_probs * log_probs).sum(dim=0)
+    mean_entropy = (entropy * mask).sum() / n_valid
+
+    # ── Q-learning TD loss ────────────────────────────────────────────────────
+    ce_detached = [ce.detach() for ce in ce_per_step]
+    q_losses: list[Tensor] = []
+
+    for t in range(T):
+        q_vals = q_values_per_step[t]  # (B, S, 2): [Q_halt, Q_continue]
+        q_halt = q_vals[:, :, 0]
+        q_cont = q_vals[:, :, 1]
+
+        # Reward: improvement in CE vs previous step
+        if t == 0:
+            reward = torch.zeros_like(ce_detached[0])
+        else:
+            reward = (ce_detached[t - 1] - ce_detached[t]).clamp(min=0.0)
+
+        # TD target for Q(halt): immediate reward (halting ends computation)
+        q_halt_target = reward
+
+        # TD target for Q(continue): reward + gamma * max Q at next step
+        if t < T - 1:
+            with torch.no_grad():
+                next_q = q_values_per_step[t + 1].detach()
+                next_max_q = next_q.max(dim=-1).values
+            q_cont_target = reward + q_gamma * next_max_q
+        else:
+            # Last step: must halt
+            q_cont_target = reward
+
+        td_halt = (q_halt - q_halt_target.detach()).pow(2)
+        td_cont = (q_cont - q_cont_target.detach()).pow(2)
+        q_loss_t = (td_halt + td_cont) * mask
+        q_losses.append(q_loss_t)
+
+    q_loss = torch.stack(q_losses, dim=0).sum(dim=0).sum() / (n_valid * T)
+
+    # ── Combined loss ─────────────────────────────────────────────────────────
+    total_loss = (task_loss - beta * mean_entropy) + q_weight * q_loss
+
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+    with torch.no_grad():
+        step_indices = torch.arange(1, T + 1, dtype=torch.float32, device=exit_probs.device)
+        avg_exit_step = (exit_probs * step_indices.view(T, 1, 1)).sum(dim=0)
+        mean_avg_exit_step = (avg_exit_step * mask).sum() / n_valid
+
+        halt_fracs = []
+        for t in range(T):
+            q_vals = q_values_per_step[t].detach()
+            halt_frac = ((q_vals[:, :, 0] > q_vals[:, :, 1]).float() * mask).sum() / n_valid
+            halt_fracs.append(halt_frac.item())
+
+    diagnostics: dict[str, Tensor | float] = {
+        "loss": total_loss.detach(),
+        "task_loss": task_loss.detach(),
+        "entropy": mean_entropy.detach(),
+        "q_loss": q_loss.detach(),
+        "avg_exit_step": mean_avg_exit_step.detach(),
+        "per_step_losses": [ce.mean().detach() for ce in ce_per_step],
+        "q_halt_fracs": halt_fracs,
+    }
+
+    return total_loss, diagnostics

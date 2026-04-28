@@ -418,6 +418,23 @@ class ArithConfig:
     use_lecun_init: bool = False  # Truncated LeCun normal init
     use_adam_atan2: bool = False  # Scale-invariant Adam variant
 
+    # H/L split (Abl 3)
+    use_hl_split: bool = False  # Split layers into H (slow) and L (fast) modules
+    n_h_layers: int = 2  # Number of H (slow) layers
+    t_inner: int = 2  # L inner loop steps
+    t_outer: int = 2  # H outer loop steps
+
+    # Q-learning ACT (Abl 5)
+    use_q_act: bool = False  # Replace exit gate with Q-head for halt/continue
+    q_weight: float = 0.1  # Weight for Q-learning loss
+    q_gamma: float = 0.99  # Discount factor for TD targets
+
+    # MoE-layer recurrence (Abl 6)
+    use_moe_recurrence: bool = False  # Route to expert layers per step
+    num_expert_layers: int = 4  # Number of expert TransformerBlocks
+    moe_top_k: int = 2  # Experts activated per token
+    moe_load_balance_weight: float = 0.01  # Load balancing loss weight
+
     # Evaluation
     n_eval: int = 500
     eval_every: int = 1_000
@@ -450,9 +467,13 @@ def _deep_supervision_step(
 
     Each segment runs T recurrent steps. Between segments, the hidden state is
     detached. Each segment gets its own loss computation and optimizer step.
+
+    Supports Q-ACT: when model has a q_head, collects Q-values and uses
+    compute_q_act_loss instead.
     """
     B, S = x.shape
     cos, sin = model.rope.get_cos_sin(S, x.device)
+    use_q = config.use_q_act and model.use_q_act
 
     h = model.embed(x)
     last_diags: dict = {}
@@ -464,20 +485,34 @@ def _deep_supervision_step(
 
         logits_per_step: list[Tensor] = []
         exit_lambdas: list[Tensor] = []
+        q_values_per_step: list[Tensor] = []
         for _ in range(config.num_recurrent_steps):
             for layer in model.layers:
                 h = layer(h, cos, sin, attn_mask)
-            logits = model.lm_head(model.final_norm(h))
-            lam = torch.sigmoid(model.exit_gate(h)).squeeze(-1)
+            logits, lam, q_vals = model._read_out(h)
             logits_per_step.append(logits)
             exit_lambdas.append(lam)
+            if q_vals is not None:
+                q_values_per_step.append(q_vals)
 
-        loss, diags = compute_loss_fn(
-            logits_per_step=logits_per_step,
-            exit_lambdas=exit_lambdas,
-            targets=tgt,
-            beta=config.beta_kl,
-        )
+        if use_q and q_values_per_step:
+            from src.training.objectives import compute_q_act_loss
+            loss, diags = compute_q_act_loss(
+                logits_per_step=logits_per_step,
+                q_values_per_step=q_values_per_step,
+                exit_lambdas=exit_lambdas,
+                targets=tgt,
+                beta=config.beta_kl,
+                q_weight=config.q_weight,
+                q_gamma=config.q_gamma,
+            )
+        else:
+            loss, diags = compute_loss_fn(
+                logits_per_step=logits_per_step,
+                exit_lambdas=exit_lambdas,
+                targets=tgt,
+                beta=config.beta_kl,
+            )
 
         optimizer.zero_grad()
         loss.backward()
@@ -505,7 +540,15 @@ def run_arith_experiment(config: ArithConfig) -> None:
     )
 
     torch.manual_seed(config.seed)
-    model = LoopLM(model_config, use_postnorm=config.use_postnorm, use_lecun_init=config.use_lecun_init).to(device)
+    model = LoopLM(
+        model_config,
+        use_postnorm=config.use_postnorm,
+        use_lecun_init=config.use_lecun_init,
+        use_q_act=config.use_q_act,
+        use_moe_recurrence=config.use_moe_recurrence,
+        num_expert_layers=config.num_expert_layers,
+        moe_top_k=config.moe_top_k,
+    ).to(device)
     P = sum(p.numel() for p in model.parameters())
 
     print(f"Arithmetic exit gate experiment")
@@ -526,6 +569,12 @@ def run_arith_experiment(config: ArithConfig) -> None:
         flags.append("lecun")
     if config.use_adam_atan2:
         flags.append("adam_atan2")
+    if config.use_hl_split:
+        flags.append(f"hl_split(H={config.n_h_layers},Ti={config.t_inner},To={config.t_outer})")
+    if config.use_q_act:
+        flags.append(f"q_act(w={config.q_weight},γ={config.q_gamma})")
+    if config.use_moe_recurrence:
+        flags.append(f"moe(N={config.num_expert_layers},k={config.moe_top_k})")
     flags_str = f"  [{', '.join(flags)}]" if flags else ""
     print(f"  max_ops={config.max_ops}  T={config.num_recurrent_steps}  beta_kl={config.beta_kl}{variant_str}{flags_str}")
     print(f"  model: h={config.hidden_size}  L={config.num_layers}  params={P:,}")
@@ -561,6 +610,15 @@ def run_arith_experiment(config: ArithConfig) -> None:
                 "use_postnorm": config.use_postnorm,
                 "use_lecun_init": config.use_lecun_init,
                 "use_adam_atan2": config.use_adam_atan2,
+                "use_hl_split": config.use_hl_split,
+                "n_h_layers": config.n_h_layers,
+                "t_inner": config.t_inner,
+                "t_outer": config.t_outer,
+                "use_q_act": config.use_q_act,
+                "q_weight": config.q_weight,
+                "use_moe_recurrence": config.use_moe_recurrence,
+                "num_expert_layers": config.num_expert_layers,
+                "moe_top_k": config.moe_top_k,
                 "seed": config.seed,
             },
         )
@@ -605,7 +663,7 @@ def run_arith_experiment(config: ArithConfig) -> None:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
 
-    from src.training.objectives import compute_looplm_loss
+    from src.training.objectives import compute_looplm_loss, compute_q_act_loss
 
     # ── Training loop ────────────────────────────────────────────────────────
     model.train()
@@ -631,13 +689,40 @@ def run_arith_experiment(config: ArithConfig) -> None:
             step += 1
         else:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                out = model(x, num_steps=config.num_recurrent_steps, attention_mask=attn_mask, detach_between_steps=config.detach_between_steps)
-                loss, diags = compute_looplm_loss(
-                    logits_per_step=out.logits,
-                    exit_lambdas=out.exit_lambdas,
-                    targets=tgt,
-                    beta=config.beta_kl,
+                out = model(
+                    x,
+                    num_steps=config.num_recurrent_steps,
+                    attention_mask=attn_mask,
+                    detach_between_steps=config.detach_between_steps,
+                    use_hl_split=config.use_hl_split,
+                    n_h_layers=config.n_h_layers,
+                    t_inner=config.t_inner,
+                    t_outer=config.t_outer,
                 )
+
+                if config.use_q_act and out.q_values is not None:
+                    loss, diags = compute_q_act_loss(
+                        logits_per_step=out.logits,
+                        q_values_per_step=out.q_values,
+                        exit_lambdas=out.exit_lambdas,
+                        targets=tgt,
+                        beta=config.beta_kl,
+                        q_weight=config.q_weight,
+                        q_gamma=config.q_gamma,
+                    )
+                else:
+                    loss, diags = compute_looplm_loss(
+                        logits_per_step=out.logits,
+                        exit_lambdas=out.exit_lambdas,
+                        targets=tgt,
+                        beta=config.beta_kl,
+                    )
+
+                # Add MoE load balancing loss
+                if out.aux_losses:
+                    lb_loss = sum(out.aux_losses) / len(out.aux_losses)
+                    loss = loss + config.moe_load_balance_weight * lb_loss
+                    diags["moe_lb_loss"] = lb_loss.detach()
 
             optimizer.zero_grad()
             loss.backward()
@@ -656,13 +741,19 @@ def run_arith_experiment(config: ArithConfig) -> None:
 
             gn = grad_norm if isinstance(grad_norm, float) else grad_norm
 
+            extra = ""
+            if "q_loss" in diags:
+                extra += f"  q={diags['q_loss'].item():.4f}"
+            if "moe_lb_loss" in diags:
+                extra += f"  lb={diags['moe_lb_loss'].item():.4f}"
+
             print(
                 f"  step {step:5d}/{config.train_steps}  "
                 f"loss={diags['loss'].item():.4f}  "
                 f"task={diags['task_loss'].item():.4f}  "
                 f"ent={diags['entropy'].item():.4f}  "
                 f"exit={diags['avg_exit_step'].item():.2f}  "
-                f"gnorm={gn:.3f}  "
+                f"gnorm={gn:.3f}{extra}  "
                 f"{step_str}  "
                 f"[{_fmt_duration(elapsed)}/{_fmt_duration(elapsed + eta)}]"
             )
@@ -680,6 +771,13 @@ def run_arith_experiment(config: ArithConfig) -> None:
                 }
                 for i, v in enumerate(per_step):
                     log_dict[f"loss_step_{i+1}"] = v.item()
+                if "q_loss" in diags:
+                    log_dict["q_loss"] = diags["q_loss"].item()
+                if "q_halt_fracs" in diags:
+                    for i, frac in enumerate(diags["q_halt_fracs"]):
+                        log_dict[f"q_halt_frac_step_{i+1}"] = frac
+                if "moe_lb_loss" in diags:
+                    log_dict["moe_lb_loss"] = diags["moe_lb_loss"].item()
                 wandb.log(log_dict, step=step)
 
         # Periodic evaluation

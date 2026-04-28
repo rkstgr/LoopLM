@@ -46,6 +46,10 @@ data/
 *.log
 logs/
 
+# JURECA-specific scripts (kept locally; backed up separately)
+*.slurm
+core.*
+
 # OS
 .DS_Store
 Thumbs.db
