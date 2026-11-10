@@ -38,105 +38,173 @@ uv run scripts/train.py \
     --output-dir ./checkpoints
 ```
 
-### Mano task
+## Project Structure
 
-`scripts/mano.slurm` — Rewritten as a SLURM job array:
-  - --array=0-8 runs 9 tasks (3 configs × 3 seeds), each with 1 GPU
-  - Maps SLURM_ARRAY_TASK_ID → (config, seed) using bash arrays
-  - Each task writes to $OUT_DIR/task_<ID>/mano_results.csv
-  - Logs use %A_%a pattern (array job ID + task ID)
+```
+LoopLM/
+├── src/
+│   ├── model/
+│   │   ├── config.py            # LoopLMConfig (small ~100M, ouro_1_4b, ouro_2_6b)
+│   │   ├── looplm.py            # LoopLM: recurrent forward pass, exit gate, generation
+│   │   ├── transformer.py       # TransformerBlock with sandwich norm, SwiGLU, RoPE MHA
+│   │   ├── rope.py              # Rotary position embeddings with dynamic base annealing
+│   │   ├── upcycle.py           # Model upcycling (layer duplication 24L -> 48L)
+│   │   ├── hf_converter.py      # Bidirectional ByteDance Ouro HF converter (safetensors)
+│   │   └── moe_layer.py         # Mixture-of-Experts recurrent layer ablation
+│   ├── training/
+│   │   ├── trainer.py           # Multi-stage Trainer (1a-4, RoPE annealing, DDP, AMP)
+│   │   ├── objectives.py        # Stage I joint loss & Stage II adaptive gate loss
+│   │   ├── data.py              # HuggingFace datasets & pre-tokenized DataLoader
+│   │   └── adam_atan2.py        # Adam-atan2 optimizer
+│   ├── inference/
+│   │   ├── kv_cache.py          # KV cache sharing (last_step, full, averaged, first_step)
+│   │   ├── early_exit.py        # Token-level Q-exit, static exit, hidden state diff
+│   │   └── lm_eval_wrapper.py   # LM Evaluation Harness integration (LoopLMLM adapter)
+│   └── analysis/
+│       ├── capo.py              # Section 6.1: Knowledge Capacity (memorization bits/param)
+│       ├── mano.py              # Section 6.2: Knowledge Manipulation (tree arithmetic mod 23)
+│       ├── arithmetic.py        # Prefix-notation modular arithmetic generator
+│       └── gen_name.py          # Entity & synthetic graph generator
+├── scripts/
+│   ├── train.py                 # Stage I continuous pre-training (CLI, multi-stage)
+│   ├── finetune_gate.py         # Stage II adaptive gate fine-tuning (frozen LM)
+│   ├── evaluate.py              # Standalone LM-Eval benchmark runner
+│   ├── eval_checkpoints.py      # Multi-checkpoint evaluation across recurrent steps
+│   ├── analyze.py               # Capo and Mano experiment suite & SLURM collector
+│   ├── upcycle.py               # CLI for model upcycling (24 -> 48 layers)
+│   ├── convert_ouro_hf.py       # CLI for ByteDance Ouro Hugging Face weight conversion
+│   ├── pretokenize_smollm.py    # Offline dataset pre-tokenization
+│   ├── download_artifacts.sh    # Pre-stage HF artifacts for offline HPC nodes
+│   └── *.slurm                  # HPC SLURM job array scripts (JUWELS H100)
+├── tests/                       # 15 test suites (262 tests passing)
+├── paper/                       # Ouro, Capo/Mano, and HRM research papers
+├── CONTRIBUTORS.md              # Project authors and AI contributors
+├── pyproject.toml
+└── README.md
+```
 
-  `scripts/analyze.py` — Added mano-collect subcommand:
-  - Reads all */mano_results.csv files from the input directory
-  - Groups by (num_layers, loop_count, total_depth), computes mean ± std
-  - Prints a formatted table and writes mano_results_combined.csv
+## Model Configs
 
-  Usage:
-  # Submit all 9 jobs in parallel
-  ```bash
-  sbatch scripts/mano.slurm
-  ```
+| Config | Parameters | Layers | Hidden ($d_{\text{model}}$) | Heads | Intermediate | Recurrent Steps ($T$) | RoPE Base |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `small()` | ~100M | 6 | 768 | 12 | 2048 | 4 | 10K |
+| `ouro_1_4b()` | 1.4B | 24 | 2048 | 16 | 5632 | 4 | 10K $\to$ 40K $\to$ 1M |
+| `ouro_2_6b()` | 2.6B | 48 | 2048 | 16 | 5632 | 4 | 10K $\to$ 40K $\to$ 1M |
 
-  # After all complete, aggregate results
-  ```bash
-  uv run scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
-  ```
+## Training
 
-### JUWELS (westai / H100)
+### Stage I Pre-Training (Local & Distributed)
 
-**One-time setup on login node** (needs internet):
+```bash
+# Single GPU quick run
+uv run scripts/train.py \
+    --model-config small \
+    --dataset wikitext \
+    --dataset-config wikitext-103-v1 \
+    --max-steps 10000 \
+    --batch-size 8 \
+    --seq-len 512 \
+    --lr 3e-4 \
+    --output-dir ./checkpoints
+```
 
+### Stage II Gate Fine-Tuning
+
+In Stage II, all language model parameters are frozen, and only the exit gate is trained using the detached performance improvement signal ($I_i^{(t)} = \max(0, \mathcal{L}^{(t-1)} - \mathcal{L}^{(t)})$):
+
+```bash
+uv run scripts/finetune_gate.py \
+    --checkpoint checkpoints/step_0010000.pt \
+    --max-steps 5000 \
+    --batch-size 8 \
+    --seq-len 512 \
+    --k 50.0 --gamma 0.005
+```
+
+### JUWELS (westai / H100 Cluster Execution)
+
+**One-time setup on login node:**
 ```bash
 uv sync
 bash scripts/download_artifacts.sh   # caches tokenizer + dataset into $PROJECT/hf_cache
 ```
 
-**Submit job:**
-
+**Submit pre-training:**
 ```bash
-# Set --account in scripts/train.slurm first, then:
 sbatch scripts/train.slurm
 ```
 
-**Monitor:**
+## Research & Analysis (Capo & Mano)
+
+LoopLM provides reproduction suites for the empirical experiments in Section 6 of the paper:
+
+### Knowledge Manipulation (Mano Task — Section 6.2)
+Trains models on modular arithmetic tree expressions (mod 23) to evaluate whether recurrent depth enhances multi-step manipulation under iso-FLOP budgets:
 
 ```bash
-squeue --me
-tail -f $(ls -t ${SCRATCH}/looplm/logs/*.out | head -1)
+# Paper reproduction with learning rate search across seeds
+uv run scripts/analyze.py mano \
+    --max-ops 10 \
+    --model-preset paper \
+    --lr-search \
+    --num-seeds 3 \
+    --report-best
+
+# Submit 9 parallel SLURM array jobs on cluster
+sbatch scripts/mano.slurm
+
+# Aggregate results across all seed tasks into mano_results_combined.csv
+uv run scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
 ```
 
-**After completion — sync wandb from login node:**
+### Knowledge Capacity (Capo Task — Section 6.1)
+Measures memorization capacity (bits of knowledge per parameter) across model sizes (`micro`, `mini`, `small`) comparing $T=1$ vs. $T=4$:
 
 ```bash
-wandb sync ${SCRATCH}/looplm/wandb/offline-run-*/
+uv run scripts/analyze.py capo \
+    --n-individuals 20000 \
+    --train-exposures 1000 \
+    --model-sizes micro mini small \
+    --loop-counts 1 4 \
+    --num-seeds 3
+
+# Aggregate Capo SLURM array jobs
+uv run scripts/analyze.py capo-collect --input-dir ${SCRATCH}/looplm/capo
 ```
 
-Compute nodes have no internet access. The SLURM script sets `HF_DATASETS_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and `WANDB_MODE=offline` automatically.
+## Evaluation Harness Integration
+
+Evaluate LoopLM checkpoints against standard benchmarks (ARC-Easy, ARC-Challenge, HellaSwag, MMLU, GSM8K) across different recurrent depths $T=1..T_{\text{max}}$:
+
+```bash
+# Evaluate across all recurrent steps T=1..4
+uv run scripts/evaluate.py \
+    --checkpoint checkpoints/step_0010000.pt \
+    --tasks arc_easy,hellaswag \
+    --eval-all-steps \
+    --limit 100
+
+# Batch evaluate checkpoints in a directory
+uv run scripts/eval_checkpoints.py \
+    --checkpoint-dir checkpoints/ \
+    --tasks arc_easy \
+    --eval-all-steps
+```
 
 ## Running Tests
 
-```bash
-uv run --with pytest pytest tests/ -v
-```
-
-Stop at first failure:
+The test suite contains **262 tests across 15 test files**, verifying architecture, numerical stability, KV cache, early exit, multi-stage scheduling, and weight conversion:
 
 ```bash
-uv run --with pytest pytest tests/ -x -v
+# Run all tests
+uv run pytest
+
+# Verbose output
+uv run pytest -v
+
+# Stop at first failure
+uv run pytest -x
 ```
-
-## Project Structure
-
-```
-src/
-  model/
-    config.py        # LoopLMConfig dataclass (small ~100M, ouro_1_4b, ouro_2_6b)
-    rope.py          # Rotary position embeddings with configurable base frequency
-    transformer.py   # TransformerBlock with sandwich norm, SwiGLU, RoPE
-    looplm.py        # LoopLM: recurrent forward pass, exit gate, per-step logits
-  training/
-    objectives.py    # Stage I entropy-regularized loss; Stage II adaptive gate loss
-    trainer.py       # Training loop: AdamW, grad clip, checkpointing, wandb logging
-    data.py          # HuggingFace dataset loading and tokenization
-scripts/
-  train.py                  # Training entry point (argparse CLI)
-  train.slurm               # SLURM job script for JUWELS westai partition
-  download_artifacts.sh     # Pre-stage HF artifacts on login node
-configs/
-  small.yaml                # ~100M params (6 layers, hidden 768, 12 heads)
-  medium.yaml               # ~400M params
-  ouro_1_4b.yaml            # 1.4B, 24 layers, hidden 2048
-  ouro_2_6b.yaml            # 2.6B, 48 layers, hidden 2048
-tests/                      # 74 tests covering all modules above
-```
-
-## Model Configs
-
-| Config      | Params | Layers | Hidden | Heads | Recurrent steps |
-|-------------|--------|--------|--------|-------|-----------------|
-| `small()`   | ~100M  | 6      | 768    | 12    | 4               |
-| `ouro_1_4b` | 1.4B   | 24     | 2048   | 16    | 4               |
-| `ouro_2_6b` | 2.6B   | 48     | 2048   | 16    | 4               |
 
 ## Implementation Status
 
