@@ -1,4 +1,4 @@
-from typing import NamedTuple
+from typing import NamedTuple, Any
 
 import torch
 import torch.nn as nn
@@ -324,3 +324,44 @@ class LoopLM(nn.Module):
             q_values=q_values if q_values else None,
             aux_losses=aux_losses,
         )
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: Tensor,
+        max_new_tokens: int = 128,
+        temperature: float = 0.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
+        eos_token_id: int | None = None,
+        strategy: str = "last_step",
+        early_exit_strategy: Any = None,
+        use_cache: bool = True,
+    ):
+        """Autoregressively generate tokens using KV-cache sharing.
+
+        Args:
+            input_ids:           (B, S) prompt token IDs
+            max_new_tokens:      maximum number of new tokens to generate
+            temperature:         sampling temperature (0.0 = greedy)
+            top_k:               top-k filtering
+            top_p:               top-p nucleus filtering
+            eos_token_id:        optional end-of-sequence token ID
+            strategy:            KV cache strategy: "last_step" (default), "full", "first_step", "averaged"
+            early_exit_strategy: optional early exit criterion
+            use_cache:           whether to use efficient KV cache decoding
+        """
+        from src.inference.kv_cache import generate
+        return generate(
+            model=self,
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            eos_token_id=eos_token_id,
+            strategy=strategy,  # type: ignore[arg-type]
+            early_exit_strategy=early_exit_strategy,
+            use_cache=use_cache,
+        )
+

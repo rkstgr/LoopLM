@@ -178,10 +178,50 @@ class LoopLMLM(LM):
         return results
 
     def generate_until(self, requests: list[Instance]) -> list[str]:
-        raise NotImplementedError(
-            "generate_until is not implemented for LoopLMLM. "
-            "Use logprob-mode tasks (arc_easy, hellaswag, etc.) instead."
-        )
+        """Generate text continuations using efficient KV-cache decode."""
+        from src.inference.kv_cache import generate
+
+        results: list[str] = []
+        for request in requests:
+            ctx_str, gen_kwargs = request.args
+            until = gen_kwargs.get("until", [])
+            if isinstance(until, str):
+                until = [until]
+
+            max_gen_toks = gen_kwargs.get("max_gen_toks", self.max_gen_toks)
+            temperature = gen_kwargs.get("temperature", 0.0)
+            top_p = gen_kwargs.get("top_p", None)
+            top_k = gen_kwargs.get("top_k", None)
+
+            ctx_tokens = self._encode(ctx_str)
+            max_ctx = self.model.config.max_seq_len - max_gen_toks
+            if len(ctx_tokens) > max_ctx and max_ctx > 0:
+                ctx_tokens = ctx_tokens[-max_ctx:]
+
+            input_ids = torch.tensor([ctx_tokens], dtype=torch.long, device=self._device)
+            gen_res = generate(
+                model=self.model,
+                input_ids=input_ids,
+                max_new_tokens=max_gen_toks,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                eos_token_id=self.eot_token_id,
+                strategy="last_step",
+            )
+
+            gen_tokens = gen_res.new_tokens[0].tolist()
+            generated_text = self.tokenizer.decode(gen_tokens, skip_special_tokens=True)
+
+            # Truncate at the earliest stop sequence in `until`
+            for stop in until:
+                if stop and stop in generated_text:
+                    generated_text = generated_text.split(stop)[0]
+
+            results.append(generated_text)
+
+        return results
+
 
 
 def _extract_acc(results: dict, task: str) -> float | None:
