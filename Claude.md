@@ -315,10 +315,11 @@ The looping adds compute but NOT memory (weights are shared).
 - [x] KV cache sharing for efficient inference
 
 ### Milestone 3: Scale Up
-- [ ] Scale to 1.4B parameters, 24 layers
-- [ ] Upcycling to 2.6B (48 layers via layer duplication)
+- [x] Scale to 1.4B parameters, 24 layers (LoopLMConfig.ouro_1_4b)
+- [x] Upcycling to 2.6B (48 layers via layer duplication, scripts/upcycle.py)
+- [x] Bidirectional ByteDance Hugging Face weight converter (scripts/convert_ouro_hf.py)
 - [ ] Full multi-stage training on larger data budget
-- [ ] Stage II adaptive gate training
+- [x] Stage II adaptive gate training (GateFinetuner)
 
 ### Milestone 4: SFT & Evaluation
 - [ ] Reasoning SFT with OpenThoughts3 + AceReason data

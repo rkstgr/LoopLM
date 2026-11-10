@@ -102,8 +102,9 @@ class LoopLM(nn.Module):
         if use_q_act:
             self.q_head = nn.Linear(config.hidden_size, 2, bias=True)
 
-        # Tie LM head weights to the embedding matrix (standard practice)
-        self.lm_head.weight = self.embed.weight
+        # Tie LM head weights to the embedding matrix if configured (standard practice)
+        if config.tie_word_embeddings:
+            self.lm_head.weight = self.embed.weight
 
         self.rope = RotaryEmbedding(
             head_dim=config.hidden_size // config.num_heads,

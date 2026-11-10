@@ -7,13 +7,14 @@ class LoopLMConfig:
     hidden_size: int = 768
     num_layers: int = 6
     num_heads: int = 12
-    # SwiGLU intermediate size; paper uses ~2.67x hidden (rounded to multiple of 64)
+    # SwiGLU intermediate size; paper uses ~2.67-2.75x hidden (rounded to multiple of 64 or 128)
     intermediate_size: int = 2048
     max_seq_len: int = 2048
     max_recurrent_steps: int = 4
     rope_base: float = 10000.0
     dropout: float = 0.0
     beta_kl: float = 0.1
+    tie_word_embeddings: bool = True
 
     def num_parameters(self) -> int:
         """Estimate total parameter count."""
@@ -26,10 +27,11 @@ class LoopLMConfig:
         #   4 RMSNorm (sandwich: pre-attn, post-attn, pre-ffn, post-ffn) — each hidden_size params
         norms = 4 * self.hidden_size
         layer = attn + ffn + norms
-        # LM head (tied with embedding by convention, so not counted separately)
-        # Exit gate: hidden_size -> 1
+        # LM head: tied with embedding by default, separate if tie_word_embeddings is False
+        lm_head = 0 if self.tie_word_embeddings else self.vocab_size * self.hidden_size
+        # Exit gate: hidden_size -> 1 (weight + bias)
         gate = self.hidden_size + 1
-        return embed + self.num_layers * layer + gate
+        return embed + self.num_layers * layer + lm_head + gate
 
     @classmethod
     def small(cls) -> "LoopLMConfig":
@@ -45,36 +47,40 @@ class LoopLMConfig:
             rope_base=10000.0,
             dropout=0.0,
             beta_kl=0.1,
+            tie_word_embeddings=True,
         )
 
     @classmethod
     def ouro_1_4b(cls) -> "LoopLMConfig":
-        """1.4B parameter config (Table 2)."""
+        """1.4B parameter config (Table 2 & ByteDance/Ouro-1.4B)."""
         return cls(
             vocab_size=49152,
             hidden_size=2048,
             num_layers=24,
             num_heads=16,
-            intermediate_size=5504,
+            intermediate_size=5632,
             max_seq_len=4096,
             max_recurrent_steps=4,
             rope_base=10000.0,
             dropout=0.0,
             beta_kl=0.1,
+            tie_word_embeddings=False,
         )
 
     @classmethod
     def ouro_2_6b(cls) -> "LoopLMConfig":
-        """2.6B parameter config — 48 layers, same hidden dim as 1.4B (Table 2)."""
+        """2.6B parameter config — 48 layers (Table 2 & ByteDance/Ouro-2.6B)."""
         return cls(
             vocab_size=49152,
             hidden_size=2048,
             num_layers=48,
             num_heads=16,
-            intermediate_size=5504,
+            intermediate_size=5632,
             max_seq_len=4096,
             max_recurrent_steps=4,
             rope_base=10000.0,
             dropout=0.0,
             beta_kl=0.1,
+            tie_word_embeddings=False,
         )
+

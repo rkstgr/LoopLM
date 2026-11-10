@@ -455,8 +455,9 @@ class Trainer:
         """Load checkpoint and return the step it was saved at."""
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.raw_model.load_state_dict(ckpt["model_state_dict"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        self.step = ckpt["step"]
+        if "optimizer_state_dict" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        self.step = ckpt.get("step", 0)
         self.stage_idx = ckpt.get("stage_idx", 0)
         self._stage_start_step = ckpt.get("stage_start_step", 0)
         if self.config.stages:

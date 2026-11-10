@@ -154,7 +154,7 @@ tests/                      # 74 tests covering all modules above
 - [x] KV cache sharing for efficient decode (last_step, full, averaged, first_step)
 - [x] Evaluation harness integration (lm-eval wrapper)
 - [x] Multi-stage training (stage transitions, RoPE base annealing, Stages 1a-4)
-- [ ] Scale to 1.4B / upcycling to 2.6B
+- [x] Scale to 1.4B / upcycling to 2.6B (layer duplication, HF weight converter)
 
 ## Multi-Stage Curriculum Training
 
@@ -177,6 +177,45 @@ uv run scripts/train.py \
     --stage3-steps 500 \
     --stage4-steps 1000 \
     --batch-size 4 --seq-len 512
+```
+
+## Model Upcycling (1.4B → 2.6B)
+
+Following Section 4.3.1 of the Ouro paper, LoopLM supports **Stability-Driven Upcycling**:
+In Stage 1b, the 24-layer 1.4B model is scaled to 48 layers (2.6B parameters) via layer duplication. Because layers are already trained recurrently, layer 23's outputs reside on the exact manifold layer 0 expects, eliminating representation shock:
+
+```bash
+# Upcycle a 24-layer checkpoint to a 48-layer checkpoint
+uv run scripts/upcycle.py \
+    --input checkpoints/ouro_1_4b_stage1a.pt \
+    --output checkpoints/ouro_2_6b_stage1b.pt \
+    --target-layers 48
+```
+
+## ByteDance Ouro Hugging Face Weight Interoperability
+
+LoopLM provides bidirectional weight conversion with official pre-trained ByteDance checkpoints (`ByteDance/Ouro-1.4B`, `ByteDance/Ouro-2.6B`) using `safetensors`:
+
+```bash
+# 1. Download & convert official ByteDance/Ouro-1.4B from Hugging Face into a LoopLM checkpoint:
+uv run scripts/convert_ouro_hf.py \
+    --hf-model ByteDance/Ouro-1.4B \
+    --output checkpoints/ouro_1_4b.pt
+
+# 2. Export a trained LoopLM checkpoint to Hugging Face format (config.json + model.safetensors):
+uv run scripts/convert_ouro_hf.py \
+    --input-checkpoint checkpoints/step_0010000.pt \
+    --output-dir ./hf_export \
+    --to-hf
+```
+
+Programmatic loading in Python:
+```python
+from src.model import load_from_hf
+
+# Load directly from HuggingFace Hub:
+model = load_from_hf("ByteDance/Ouro-1.4B", device="cuda")
+res = model.generate(input_ids, strategy="last_step")
 ```
 
 ## Inference & Generation
@@ -210,7 +249,8 @@ print("Generated token IDs:", res.sequences)
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the full list of project contributors.
 - **supus4562** — Core architecture, training framework, evaluation harness.
-- **Claude** (Anthropic) — KV-cache sharing, token-level early exit matching Ouro, and multi-stage training pipeline.
+- **Claude** (Anthropic) — KV-cache sharing, token-level early exit matching Ouro, multi-stage training pipeline, model upcycling (1.4B → 2.6B), and official ByteDance Hugging Face weight converter.
+
 
 ## Future Ideas
 
