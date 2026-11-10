@@ -311,7 +311,7 @@ The looping adds compute but NOT memory (weights are shared).
 - [ ] Progressive batch size scaling
 - [ ] RoPE base frequency adjustment across stages
 - [ ] β annealing (0.1 → 0.05)
-- [ ] KV cache sharing for efficient inference
+- [x] KV cache sharing for efficient inference
 
 ### Milestone 3: Scale Up
 - [ ] Scale to 1.4B parameters, 24 layers

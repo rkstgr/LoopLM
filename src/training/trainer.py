@@ -606,7 +606,8 @@ class GateFinetuner:
                         self.model, x, QExit(q),
                         max_steps=self.config.num_recurrent_steps,
                     )
-                total_exit_steps += result.exit_step * B
+                exit_val = result.mean_exit_step if result.mean_exit_step is not None else float(result.exit_step)
+                total_exit_steps += exit_val * B
                 total_sequences += B
 
             if total_sequences:

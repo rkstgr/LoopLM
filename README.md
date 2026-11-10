@@ -150,13 +150,41 @@ tests/                      # 74 tests covering all modules above
 - [x] Data pipeline (HuggingFace datasets, tokenization)
 - [x] Training entry point (`scripts/train.py`)
 - [x] SLURM job script for JUWELS westai (H100)
-- [ ] Early exit inference strategies (Q-exit, hidden state diff)
-- [ ] KV cache sharing for efficient decode
-- [ ] Evaluation harness integration (lm-eval)
+- [x] Early exit inference strategies (token-level Q-exit matching Ouro, hidden state diff)
+- [x] KV cache sharing for efficient decode (last_step, full, averaged, first_step)
+- [x] Evaluation harness integration (lm-eval wrapper)
 - [ ] Multi-stage training (stage transitions, RoPE base annealing)
 - [ ] Scale to 1.4B / upcycling to 2.6B
 
+## Inference & Generation
+
+LoopLM supports efficient autoregressive decoding with **KV-cache sharing** across recurrent steps (Section 5.4.2 & Table 14 of the Ouro paper):
+
+- **`last_step`** (recommended): All decode steps reuse the final recurrent step's KV cache, yielding a **4× memory reduction** with negligible accuracy difference compared to uncompressed KV caches.
+- **`full`**: Uncompressed baseline maintaining separate KV caches for all $T \times L$ layers.
+- **`averaged`**: Maintains a running average of KV representations across recurrent loops.
+- **`first_step`**: Reuses step 1 representations only (ablation baseline).
+
+```python
+import torch
+from src.model.config import LoopLMConfig
+from src.model.looplm import LoopLM
+
+model = LoopLM(LoopLMConfig.small()).eval()
+input_ids = torch.tensor([[1, 42, 108]])
+
+# Autoregressive generation with 4x memory savings via last-step KV sharing:
+res = model.generate(
+    input_ids,
+    max_new_tokens=64,
+    temperature=0.0,      # greedy decode
+    strategy="last_step", # options: "last_step", "full", "averaged", "first_step"
+)
+print("Generated token IDs:", res.sequences)
+```
+
 ## Future Ideas
+
 
 ### Detached recurrence (truncated BPTT)
 Only backprop through the last recurrent step, detaching hidden states between iterations. [HRM](https://arxiv.org/) does this. Eliminates gradient explosion entirely but loses cross-step gradient coordination. Each step still gets a direct loss signal, and since weights are shared, improving one step tends to improve all.
