@@ -18,7 +18,23 @@ from src.training.objectives import compute_adaptive_gate_loss, compute_looplm_l
 
 @dataclass
 class StageConfig:
-    """Configuration for a single training stage."""
+    """Configuration for a single training stage.
+
+    Hyperparameters follow Ouro paper (arXiv:2510.25741) Table 1:
+
+    | Stage | LR   | Schedule | T  | β    | RoPE base | Seq len |
+    |-------|------|----------|----|------|-----------|---------|
+    | 1a    | 3e-4 | Constant | 8  | 0.1  | 10K       | 4K      |
+    | 1b    | 3e-4 | Constant | 4  | 0.1  | 10K       | 4K      |
+    | 2     | 3e-5 | Cosine   | 4  | 0.05 | 40K       | 16K     |
+    | 3     | 3e-5 | Constant | 4  | 0.05 | 1M        | 64K     |
+    | 4     | 1e-5 | Cosine   | 4  | 0.05 | 1M        | 32K     |
+
+    ``seq_len`` and ``grad_accum_steps`` are optional (``None`` means keep the
+    trainer's global setting at startup, so existing code is unchanged).
+    When set, they instruct the trainer to rebuild the DataLoader at the start
+    of that stage via the ``dataloader_factory`` callback.
+    """
     name: str
     max_steps: int
     lr: float = 3e-4
@@ -26,21 +42,54 @@ class StageConfig:
     num_recurrent_steps: int = 4
     beta_kl: float = 0.1
     rope_base: float = 10_000.0
+    # Optional per-stage overrides (None = inherit trainer default at startup)
+    seq_len: int | None = None
+    grad_accum_steps: int | None = None
 
 
 def make_stage_1a(max_steps: int) -> StageConfig:
+    """Stage 1a — T=8, constant LR 3e-4, beta=0.1, RoPE 10K (Ouro Table 1)."""
     return StageConfig("1a", max_steps, lr=3e-4, lr_schedule="constant",
                        num_recurrent_steps=8, beta_kl=0.1, rope_base=10_000.0)
 
 
 def make_stage_1b(max_steps: int) -> StageConfig:
+    """Stage 1b — T=4, constant LR 3e-4, beta=0.1, RoPE 10K (Ouro Table 1)."""
     return StageConfig("1b", max_steps, lr=3e-4, lr_schedule="constant",
                        num_recurrent_steps=4, beta_kl=0.1, rope_base=10_000.0)
 
 
 def make_stage_2(max_steps: int) -> StageConfig:
+    """Stage 2 — T=4, cosine LR 3e-5, beta=0.05, RoPE 40K (Ouro Table 1).
+
+    Ouro uses this stage at 16K context with 1.4T tokens of reasoning-heavy
+    data (OpenCoder-Annealing, MegaMath-HQ).
+    """
     return StageConfig("2", max_steps, lr=3e-5, lr_schedule="cosine",
                        num_recurrent_steps=4, beta_kl=0.05, rope_base=40_000.0)
+
+
+def make_stage_3(max_steps: int) -> StageConfig:
+    """Stage 3 — T=4, constant LR 3e-5, beta=0.05, RoPE 1M (Ouro Table 1).
+
+    Designed for long-context annealing at 64K tokens using ~20B tokens of
+    long-document data. The 1M RoPE base dramatically extends effective context
+    without destabilising the shared-weight block learned in Stages 1 and 2.
+    """
+    return StageConfig("3", max_steps, lr=3e-5, lr_schedule="constant",
+                       num_recurrent_steps=4, beta_kl=0.05, rope_base=1_000_000.0)
+
+
+def make_stage_4(max_steps: int) -> StageConfig:
+    """Stage 4 — T=4, cosine LR 1e-5, beta=0.05, RoPE 1M (Ouro Table 1).
+
+    Supervised fine-tuning (SFT) stage at 32K context with ~300B tokens of
+    instruction data (OpenThoughts3, AceReason). Cosine schedule decays LR to
+    10% of base over the full step budget.
+    """
+    return StageConfig("4", max_steps, lr=1e-5, lr_schedule="cosine",
+                       num_recurrent_steps=4, beta_kl=0.05, rope_base=1_000_000.0)
+
 
 
 def _cosine_lr(base_lr: float, step: int, total_steps: int,
@@ -131,7 +180,24 @@ class Trainer:
     """
 
     def __init__(self, model_config: LoopLMConfig, trainer_config: TrainerConfig,
-                 model_kwargs: dict | None = None):
+                 model_kwargs: dict | None = None,
+                 dataloader_factory=None,
+                 base_seq_len: int = 512):
+        """Initialise the trainer.
+
+        Args:
+            model_config:        LoopLMConfig for the model architecture.
+            trainer_config:      TrainerConfig with optimizer and stage settings.
+            model_kwargs:        Extra kwargs forwarded to LoopLM (e.g. use_q_act).
+            dataloader_factory:  Optional callable ``(seq_len, grad_accum_steps) ->
+                                 DataLoader``. When provided, stage transitions that
+                                 declare a new ``seq_len`` or ``grad_accum_steps``
+                                 will call this to rebuild the DataLoader and store
+                                 the result in ``self._current_dataloader``.
+            base_seq_len:        The initial sequence length. Used to detect when
+                                 a stage transition requires a DataLoader rebuild.
+        """
+
         self.model_config = model_config
         self.config = trainer_config
         self.device = _resolve_device(trainer_config.device)
@@ -153,6 +219,13 @@ class Trainer:
         )
         self.step = 0
         self._accum_count = 0
+
+        # DataLoader factory + current-state tracking for stage-driven rebuilds
+        self._dataloader_factory = dataloader_factory
+        self._base_seq_len = base_seq_len
+        self._current_seq_len = base_seq_len
+        self._current_accum_steps = trainer_config.grad_accum_steps
+        self._current_dataloader = None  # set by external code or stage transitions
 
         # Multi-stage state
         self.stage_idx: int = 0
@@ -188,7 +261,15 @@ class Trainer:
     # ── Stage lifecycle ────────────────────────────────────────────────────────
 
     def _apply_stage(self, stage: StageConfig, steps_into_stage: int = 0) -> None:
-        """Apply a stage's hyperparameters, optionally resuming mid-stage."""
+        """Apply a stage's hyperparameters, optionally resuming mid-stage.
+
+        If the stage declares a ``seq_len`` or ``grad_accum_steps`` that
+        differs from the current trainer settings *and* a
+        ``dataloader_factory`` was provided at construction time, the factory
+        is called to build a new DataLoader and store it in
+        ``self._current_dataloader``.  The training loop in ``scripts/train.py``
+        can poll ``trainer._current_dataloader`` for the latest DataLoader.
+        """
         # Update optimizer LR
         lr = stage.lr
         if stage.lr_schedule == "cosine" and steps_into_stage > 0:
@@ -200,8 +281,29 @@ class Trainer:
         self.config.num_recurrent_steps = stage.num_recurrent_steps
         self.config.beta_kl = stage.beta_kl
 
-        # Update RoPE base
+        # Update RoPE base — recomputes frequency caches in-place, zero overhead
         self.raw_model.rope.set_base(stage.rope_base)
+
+        # Apply per-stage grad_accum_steps override
+        if stage.grad_accum_steps is not None:
+            self.config.grad_accum_steps = stage.grad_accum_steps
+
+        # Rebuild DataLoader if seq_len or grad_accum changed and factory exists
+        new_seq_len = stage.seq_len or self._base_seq_len
+        new_accum = self.config.grad_accum_steps
+        if (
+            self._dataloader_factory is not None
+            and (new_seq_len != self._current_seq_len
+                 or new_accum != self._current_accum_steps)
+        ):
+            self._current_seq_len = new_seq_len
+            self._current_accum_steps = new_accum
+            self._current_dataloader = self._dataloader_factory(new_seq_len, new_accum)
+            if self.rank0:
+                print(
+                    f"[stage {stage.name}] Rebuilt DataLoader: "
+                    f"seq_len={new_seq_len}  grad_accum={new_accum}"
+                )
 
         # Store schedule info for _update_lr
         self._stage_schedule = (stage.lr_schedule, stage.lr, stage.max_steps)
@@ -301,9 +403,17 @@ class Trainer:
     # ── Training loop ─────────────────────────────────────────────────────────
 
     def train(self, dataloader) -> None:
-        """Train until max_steps, cycling through the dataloader as needed."""
-        data_iter = _infinite(dataloader)
+        """Train until max_steps, cycling through the dataloader as needed.
+
+        If a stage transition creates a new DataLoader (via dataloader_factory),
+        it is automatically picked up mid-run.
+        """
+        current_dl = dataloader
+        data_iter = _infinite(current_dl)
         while self.step < self.config.max_steps:
+            if self._current_dataloader is not None and self._current_dataloader is not current_dl:
+                current_dl = self._current_dataloader
+                data_iter = _infinite(current_dl)
             batch = next(data_iter)
             diag = self.train_step(batch)
 

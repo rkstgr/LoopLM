@@ -25,6 +25,8 @@ from src.training.trainer import (
     make_stage_1a,
     make_stage_1b,
     make_stage_2,
+    make_stage_3,
+    make_stage_4,
 )
 from src.training.data import make_dataloader
 
@@ -80,6 +82,10 @@ def parse_args():
                    help="Steps for Stage 1b (T=4, constant LR 3e-4, β=0.1). 0=skip.")
     p.add_argument("--stage2-steps", type=int, default=0,
                    help="Steps for Stage 2 (T=4, cosine LR 3e-5, β=0.05, rope 40K). 0=skip.")
+    p.add_argument("--stage3-steps", type=int, default=0,
+                   help="Steps for Stage 3 (T=4, constant LR 3e-5, β=0.05, rope 1M). 0=skip.")
+    p.add_argument("--stage4-steps", type=int, default=0,
+                   help="Steps for Stage 4 (T=4, cosine LR 1e-5, β=0.05, rope 1M, SFT). 0=skip.")
 
     # Logging & checkpointing
     p.add_argument("--log-every", type=int, default=50)
@@ -219,6 +225,10 @@ def main():
         stages.append(make_stage_1b(args.stage1b_steps))
     if args.stage2_steps > 0:
         stages.append(make_stage_2(args.stage2_steps))
+    if args.stage3_steps > 0:
+        stages.append(make_stage_3(args.stage3_steps))
+    if args.stage4_steps > 0:
+        stages.append(make_stage_4(args.stage4_steps))
 
     # When stages are provided, max_steps is ignored (total = sum of stage steps)
     effective_max_steps = args.max_steps if not stages else sum(s.max_steps for s in stages)
@@ -277,25 +287,35 @@ def main():
 
     if rank == 0:
         print("Loading dataset...")
-    if args.data_dir:
-        from src.training.data import make_pretokenized_dataloader
-        dataloader = make_pretokenized_dataloader(
-            data_dir=args.data_dir,
-            seq_len=args.seq_len,
-            micro_batch_size=args.batch_size,
-        )
-    else:
-        dataloader = make_dataloader(
-            dataset_name=args.dataset,
-            dataset_config=args.dataset_config,
-            split=args.split,
-            tokenizer_id=args.tokenizer_id,
-            seq_len=args.seq_len,
-            batch_size=args.batch_size,
-            max_chunks=args.max_chunks,
-        )
+    def dataloader_factory(seq_len: int, grad_accum_steps: int):
+        if args.data_dir:
+            from src.training.data import make_pretokenized_dataloader
+            return make_pretokenized_dataloader(
+                data_dir=args.data_dir,
+                seq_len=seq_len,
+                micro_batch_size=args.batch_size,
+            )
+        else:
+            return make_dataloader(
+                dataset_name=args.dataset,
+                dataset_config=args.dataset_config,
+                split=args.split,
+                tokenizer_id=args.tokenizer_id,
+                seq_len=seq_len,
+                batch_size=args.batch_size,
+                max_chunks=args.max_chunks,
+            )
 
-    trainer = Trainer(model_cfg, trainer_cfg, model_kwargs=model_kwargs)
+    dataloader = dataloader_factory(args.seq_len, args.grad_accum_steps)
+
+    trainer = Trainer(
+        model_cfg,
+        trainer_cfg,
+        model_kwargs=model_kwargs,
+        dataloader_factory=dataloader_factory,
+        base_seq_len=args.seq_len,
+    )
+    trainer._current_dataloader = dataloader
     num_steps = args.num_recurrent_steps or model_cfg.max_recurrent_steps
 
     if args.gradient_checkpointing:
@@ -313,12 +333,16 @@ def main():
     history: dict[str, list] = defaultdict(list)
 
     from src.training.trainer import _infinite
-    data_iter = _infinite(dataloader)
+    current_dl = dataloader
+    data_iter = _infinite(current_dl)
 
     if rank == 0:
         print(f"\nStarting training for {trainer_cfg.max_steps} steps...\n")
 
     while trainer.step < trainer_cfg.max_steps:
+        if trainer._current_dataloader is not None and trainer._current_dataloader is not current_dl:
+            current_dl = trainer._current_dataloader
+            data_iter = _infinite(current_dl)
         batch = next(data_iter)
         diag = trainer.train_step(batch)
 

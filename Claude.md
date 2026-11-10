@@ -307,10 +307,11 @@ The looping adds compute but NOT memory (weights are shared).
 - [ ] Verify performance improves with recurrent depth on ARC, HellaSwag
 
 ### Milestone 2: Training Pipeline
-- [ ] Multi-stage training (at minimum Stages 1+2)
-- [ ] Progressive batch size scaling
-- [ ] RoPE base frequency adjustment across stages
-- [ ] β annealing (0.1 → 0.05)
+- [x] Multi-stage training (Stages 1a, 1b, 2, 3, 4 with automatic transitions)
+- [x] Progressive batch size scaling (per-stage grad_accum_steps)
+- [x] RoPE base frequency adjustment across stages (10K → 40K → 1M)
+- [x] β annealing (0.1 → 0.05)
+- [x] Dynamic context expansion & DataLoader rebuilding
 - [x] KV cache sharing for efficient inference
 
 ### Milestone 3: Scale Up

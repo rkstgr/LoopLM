@@ -153,8 +153,31 @@ tests/                      # 74 tests covering all modules above
 - [x] Early exit inference strategies (token-level Q-exit matching Ouro, hidden state diff)
 - [x] KV cache sharing for efficient decode (last_step, full, averaged, first_step)
 - [x] Evaluation harness integration (lm-eval wrapper)
-- [ ] Multi-stage training (stage transitions, RoPE base annealing)
+- [x] Multi-stage training (stage transitions, RoPE base annealing, Stages 1a-4)
 - [ ] Scale to 1.4B / upcycling to 2.6B
+
+## Multi-Stage Curriculum Training
+
+LoopLM implements the complete 4-stage training curriculum from Table 1 of the Ouro paper:
+
+- **Stage 1a** ($T=8$, constant LR $3\times 10^{-4}$, $\beta=0.1$, RoPE base $10\text{K}$, 4K context) — initial deep recurrence setup.
+- **Stage 1b** ($T=4$, constant LR $3\times 10^{-4}$, $\beta=0.1$, RoPE base $10\text{K}$, 4K context) — stabilization of gradient dynamics.
+- **Stage 2** ($T=4$, cosine LR $3\times 10^{-5}$, $\beta=0.05$, RoPE base **$40\text{K}$**, 16K context) — reasoning data annealing and context expansion.
+- **Stage 3** ($T=4$, constant LR $3\times 10^{-5}$, $\beta=0.05$, RoPE base **$1\text{M}$**, 64K context) — ultra-long context annealing.
+- **Stage 4** ($T=4$, cosine LR $1\times 10^{-5}$, $\beta=0.05$, RoPE base $1\text{M}$, 32K context) — reasoning SFT fine-tuning.
+
+Stage transitions happen automatically during training, updating learning rate schedules, recurrent steps $T$, entropy penalty $\beta$, RoPE base frequency via `model.rope.set_base(...)`, gradient accumulation steps, and rebuilding DataLoaders for expanded context windows.
+
+```bash
+# Example: 5-stage continuous curriculum
+uv run scripts/train.py \
+    --stage1a-steps 2000 \
+    --stage1b-steps 2000 \
+    --stage2-steps 1500 \
+    --stage3-steps 500 \
+    --stage4-steps 1000 \
+    --batch-size 4 --seq-len 512
+```
 
 ## Inference & Generation
 
@@ -183,6 +206,12 @@ res = model.generate(
 print("Generated token IDs:", res.sequences)
 ```
 
+## Contributors
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the full list of project contributors.
+- **supus4562** — Core architecture, training framework, evaluation harness.
+- **Claude** (Anthropic) — KV-cache sharing, token-level early exit matching Ouro, and multi-stage training pipeline.
+
 ## Future Ideas
 
 
@@ -208,3 +237,4 @@ A curriculum schedule (early recurrence steps first, shift to later steps as tra
 
 - Paper: [arXiv:2510.25741v4](https://arxiv.org/abs/2510.25741)
 - Project page: https://ouro-llm.github.io
+

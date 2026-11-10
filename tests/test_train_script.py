@@ -9,7 +9,16 @@ from torch.utils.data import DataLoader, TensorDataset
 from collections import defaultdict
 
 from src.model.config import LoopLMConfig
-from src.training.trainer import Trainer, TrainerConfig, _infinite
+from src.training.trainer import (
+    Trainer,
+    TrainerConfig,
+    _infinite,
+    make_stage_1a,
+    make_stage_1b,
+    make_stage_2,
+    make_stage_3,
+    make_stage_4,
+)
 from src.training.data import tokenize_and_chunk
 
 
@@ -147,3 +156,34 @@ def test_per_step_losses_are_distinct(tiny_cfg, tmp_path):
     # All must be finite and positive
     for t, l in enumerate(losses):
         assert l > 0 and torch.isfinite(torch.tensor(l)), f"Invalid loss at step t={t+1}: {l}"
+
+
+def test_multi_stage_smoke_five_stages(tiny_cfg, tmp_path):
+    """End-to-end multi-stage training smoke test cycling through all 5 stages (1a→1b→2→3→4)."""
+    stages = [
+        make_stage_1a(2),
+        make_stage_1b(2),
+        make_stage_2(2),
+        make_stage_3(2),
+        make_stage_4(2),
+    ]
+    trainer_cfg = TrainerConfig(
+        stages=stages,
+        log_every=999,
+        save_every=999,
+        checkpoint_dir=str(tmp_path / "ckpts"),
+        use_wandb=False,
+        device="cpu",
+    )
+    dl = make_synthetic_dataloader(tiny_cfg.vocab_size, seq_len=9)
+    trainer = Trainer(tiny_cfg, trainer_cfg)
+
+    data_iter = _infinite(dl)
+    for _ in range(10):
+        batch = next(data_iter)
+        diag = trainer.train_step(batch)
+        assert torch.isfinite(diag["loss"]), "Loss must be finite"
+
+    assert trainer.step == 10
+    assert trainer.stage_idx == 4
+    assert trainer.raw_model.rope.base == pytest.approx(1_000_000.0)
