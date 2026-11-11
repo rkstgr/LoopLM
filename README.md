@@ -375,6 +375,19 @@ print("Generated token IDs:", res.sequences)
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for full attribution details.
 
+## Contributing
+
+Contributions from the open-source and research community are warmly welcomed and strongly encouraged!
+
+Whether you want to:
+- Implement new recurrent routing, step-skipping, or KV-cache strategies
+- Benchmark on new reasoning datasets (GSM8K, MATH, ARC, HumanEval)
+- Write custom Triton / CUDA acceleration kernels
+- Explore mechanistic interpretability of looped representation spaces
+- Improve documentation, clean up code, or add test cases
+
+Please feel free to open an issue or submit a pull request. We look forward to collaborating!
+
 ## License
 
 This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.

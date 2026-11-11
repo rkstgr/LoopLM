@@ -22,3 +22,19 @@ This project is an open research implementation of Looped Language Models based 
 ## Attribution & Repository Lineage
 
 This repository is maintained and developed by **[@supus4562](https://github.com/supus4562)** as an enhanced downstream fork of [`rkstgr/LoopLM`](https://github.com/rkstgr/LoopLM). All foundational architecture from commits 1 through 58 is authored by original creator **Erik Steiger** (`@rkstgr`), and all subsequent enhancements, Ouro scaling milestones, cloud runners, and new capabilities are authored by **@supus4562**.
+
+---
+
+## Community Contributions Encouraged
+
+We warmly welcome and actively encourage contributions from the broader research and open-source community! 
+
+Whether you are interested in:
+- Proposing novel recurrent architectures, routing mechanisms, or step-skipping schemes
+- Adding benchmark evaluation suites (e.g., GSM8K, MATH, HumanEval, ARC)
+- Writing optimized Triton or CUDA attention kernels
+- Performing mechanistic interpretability on recurrent hidden state geometry
+- Fixing bugs, writing documentation, or expanding unit tests
+
+All contributions, feedback, and pull requests are welcomed. Feel free to open an issue or submit a pull request!
+
