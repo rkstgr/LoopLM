@@ -365,12 +365,13 @@ res = model.generate(
 print("Generated token IDs:", res.sequences)
 ```
 
-## Contributors & Attribution
+## Contributors
 
-This repository is a downstream fork of [`rkstgr/LoopLM`](https://github.com/rkstgr/LoopLM).
-- **Erik Steiger** ([@rkstgr](https://github.com/rkstgr), `rkstgr@gmail.com`) — Original author and creator of the upstream codebase (commits 1–58 up to snapshot `8d79e31`), including core recurrence loop, sandwich normalization, Q-ACT, gate finetuning, MANO analysis, training harness, and HPC scripts.
-- **supus4562** ([@supus4562](https://github.com/supus4562)) — Fork maintainer; architecture extensions, multi-stage curriculum training integration, upcycling infrastructure, KV-cache sharing, checkpoint safety, and tooling.
-- **Claude** (Anthropic) — AI contributor: KV-cache sharing, token-level early exit matching Ouro, multi-stage training pipeline with RoPE annealing, model upcycling (1.4B → 2.6B), official ByteDance Hugging Face weight converter, and checkpoint safety wrappers.
+| Contributor | Role & Contributions |
+|:---|:---|
+| **[@supus4562](https://github.com/supus4562)** | **Maintainer & Lead Contributor** — Architecture extensions, KV-cache sharing, multi-stage curriculum (Stages 1a–4), model upcycling (1.4B → 2.6B), Hugging Face weight converter, Modal.com serverless GPU execution, and security hardening. |
+| **[@rkstgr](https://github.com/rkstgr)** | **Original Creator & Upstream Author** — Foundational looped transformer architecture (commits 1–58), recurrence loop, sandwich normalization, training loop, gate loss, and MANO/Capo analysis. |
+| **Claude** (Anthropic) | **AI Contributor** — Implementation assistance for KV cache sharing, token-level early exit, multi-stage curriculum, upcycling, and cloud runners. |
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) for full attribution details.
 

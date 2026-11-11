@@ -1,26 +1,24 @@
-# Contributors & Attribution
+# Contributors
 
 This project is an open research implementation of Looped Language Models based on [Scaling Latent Reasoning via Looped Language Models](https://arxiv.org/abs/2510.25741) (Ouro, NeurIPS 2026).
 
-This repository is a downstream fork of the upstream project [`rkstgr/LoopLM`](https://github.com/rkstgr/LoopLM).
+## Active Maintainers & Contributors
 
-## Original Author & Upstream Creator
-- **Erik Steiger** ([@rkstgr](https://github.com/rkstgr), `rkstgr@gmail.com`) — Original author and creator of LoopLM. Designed, developed, and authored all work in commits 1 through 58 (up to snapshot `8d79e31`), including:
-  - Foundational looped transformer architecture with sandwich normalization (`TransformerBlock`, `RMSNorm`, `SwiGLU`, `RoPE`).
-  - Core recurrent forward pass and multi-step exit gate loss.
-  - Initial training loop, Adam-atan2 optimizer, and JURECA supercomputing / SLURM infrastructure.
-  - Gate finetuning (`GateFinetuner`) and Q-ACT adaptive computation time heads.
-  - MANO representation geometry and dynamical systems trajectory analysis.
+| Contributor | Role & Contributions |
+|:---|:---|
+| [![supus4562](https://github.com/supus4562.png?size=64)](https://github.com/supus4562)<br>**[supus4562](https://github.com/supus4562)** | **Maintainer & Lead Contributor**<br>• Core architecture extensions & Ouro-1.4B/2.6B scaling<br>• KV-cache sharing and autoregressive decode engine (`last_step`, `full`, `averaged`)<br>• Multi-stage curriculum training pipeline (Stages 1a–4) with dynamic RoPE base frequency annealing<br>• Stability-driven model upcycling via layer duplication (24L → 48L)<br>• Official ByteDance Hugging Face bidirectional weight converter (`safetensors`)<br>• Serverless cloud GPU training on Modal.com & universal multi-GPU DDP launcher<br>• Checkpoint security defenses (`load_checkpoint_safe`) and artifact verification |
+| [![rkstgr](https://github.com/rkstgr.png?size=64)](https://github.com/rkstgr)<br>**[Erik Steiger (@rkstgr)](https://github.com/rkstgr)** | **Original Upstream Author (Commits 1–58)**<br>• Initial recurrent transformer architecture with sandwich normalization (`TransformerBlock`, `RMSNorm`, `SwiGLU`, `RoPE`)<br>• Core recurrent forward pass and multi-step exit gate loss<br>• Initial training loop, Adam-atan2 optimizer, and JURECA supercomputing infrastructure<br>• Gate finetuning (`GateFinetuner`) and Q-ACT adaptive computation time heads<br>• MANO representation geometry and Capo knowledge capacity analysis suites |
 
-## Fork Maintainer & Enhancements
-- **supus4562** ([@supus4562](https://github.com/supus4562)) — Fork maintainer; oversaw extension to Ouro-1.4B / 2.6B parity, multi-stage curriculum orchestration, upcycling infrastructure, KV cache sharing benchmarks, security hardening, and ongoing development.
+---
 
 ## AI Contributors
-- **Claude** (Anthropic) — Key architectural contributions:
-  - KV-cache sharing and efficient autoregressive decoding (`last_step`, `full`, `averaged`, `first_step`).
-  - Pre-allocated zero-copy dynamic `KVCache` buffer eliminating $O(S^2)$ memory fragmentation.
-  - Token-level and batch-heterogeneous early exit with exact PDF/CDF distributions matching ByteDance Ouro-1.4B reference dynamics.
-  - Multi-stage curriculum training with automatic stage transitions (1a, 1b, 2, 3, 4), dynamic RoPE base frequency annealing ($10\text{K} \to 40\text{K} \to 1\text{M}$), per-stage gradient accumulation scaling, and dynamic DataLoader context expansion.
-  - Model upcycling (1.4B 24 layers → 2.6B 48 layers) via layer duplication.
-  - Bidirectional ByteDance Ouro Hugging Face weight converter supporting official checkpoints (`ByteDance/Ouro-1.4B`, `ByteDance/Ouro-2.6B`) with `safetensors`.
-  - Checkpoint safety serialization (`load_checkpoint_safe`) and artifact checksum verification.
+
+| Contributor | Role & Contributions |
+|:---|:---|
+| **[Claude](https://anthropic.com)** (Anthropic) | **AI Research & Engineering Contributor**<br>• Co-authoring and implementation assistance across KV-cache sharing, token-level early exit matching Ouro reference dynamics, multi-stage training pipeline, layer duplication upcycling, and cloud runners |
+
+---
+
+## Attribution & Repository Lineage
+
+This repository is maintained and developed by **[@supus4562](https://github.com/supus4562)** as an enhanced downstream fork of [`rkstgr/LoopLM`](https://github.com/rkstgr/LoopLM). All foundational architecture from commits 1 through 58 is authored by original creator **Erik Steiger** (`@rkstgr`), and all subsequent enhancements, Ouro scaling milestones, cloud runners, and new capabilities are authored by **@supus4562**.

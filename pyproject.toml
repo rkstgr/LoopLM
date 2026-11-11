@@ -5,8 +5,8 @@ description = "Looped Language Model research implementation"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [
+    { name = "supus4562", email = "hamza3140000@gmail.com" },
     { name = "Erik Steiger", email = "rkstgr@gmail.com" },
-    { name = "supus4562" },
 ]
 requires-python = ">=3.10"
 dependencies = [
