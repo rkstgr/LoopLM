@@ -60,6 +60,15 @@ Thumbs.db
 *.swp
 *.swo
 
-# Secrets
-.env
+# Secrets and Credentials
+.env*
+!.env.example
+*.pem
 *.key
+*.secret*
+*credentials*
+id_rsa*
+id_ed25519*
+*.token
+*.p12
+*.pfx

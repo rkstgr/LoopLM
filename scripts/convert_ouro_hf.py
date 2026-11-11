@@ -23,6 +23,7 @@ import torch
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 from src.model.hf_converter import load_from_hf, save_to_hf
+from src.utils import load_checkpoint_safe
 
 
 def parse_args():
@@ -68,6 +69,12 @@ def parse_args():
         choices=["float32", "float16", "bfloat16"],
         help="Precision for converted weights",
     )
+    parser.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        default=False,
+        help="Allow unpickling legacy arbitrary code if safe loading fails",
+    )
     return parser.parse_args()
 
 
@@ -86,7 +93,7 @@ def main():
             sys.exit(1)
 
         print(f"Loading LoopLM checkpoint from {args.input_checkpoint}...")
-        ckpt = torch.load(args.input_checkpoint, map_location="cpu", weights_only=False)
+        ckpt = load_checkpoint_safe(args.input_checkpoint, map_location="cpu", trust=args.trust_checkpoint)
 
         if "model_config" in ckpt:
             cfg = LoopLMConfig(**ckpt["model_config"])

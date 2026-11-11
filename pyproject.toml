@@ -1,6 +1,13 @@
 [project]
 name = "looplm"
 version = "0.1.0"
+description = "Looped Language Model research implementation"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Erik Steiger", email = "rkstgr@gmail.com" },
+    { name = "supus4562" },
+]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",

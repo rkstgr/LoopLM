@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 from src.inference.lm_eval_wrapper import LoopLMLM, run_eval, _extract_acc
+from src.utils import load_checkpoint_safe
 from transformers import AutoTokenizer
 
 
@@ -30,13 +31,19 @@ def main():
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--tokenizer-id", default="HuggingFaceTB/SmolLM2-135M")
     p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        default=False,
+        help="Allow unpickling legacy arbitrary code if safe loading fails",
+    )
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
 
     print(f"Loading checkpoint: {args.checkpoint}")
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ckpt = load_checkpoint_safe(args.checkpoint, map_location="cpu", trust=args.trust_checkpoint)
 
     model_cfg = LoopLMConfig(**ckpt["model_config"])
     print(f"Model: L={model_cfg.num_layers}, T={model_cfg.max_recurrent_steps}, "

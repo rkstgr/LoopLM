@@ -32,6 +32,7 @@ from torch import Tensor
 
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
+from src.utils import load_checkpoint_safe
 
 
 # ── Mapping tables ─────────────────────────────────────────────────────────────
@@ -297,7 +298,7 @@ def load_from_hf(
             shard_dict = safetensors.torch.load_file(str(shard_path), device="cpu")
             raw_state_dict.update(shard_dict)
     elif single_bin.exists():
-        raw_state_dict = torch.load(single_bin, map_location="cpu", weights_only=True)
+        raw_state_dict = load_checkpoint_safe(single_bin, map_location="cpu")
     else:
         # Check any .safetensors in directory
         all_st = list(local_path.glob("*.safetensors"))

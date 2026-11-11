@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 from src.inference.lm_eval_wrapper import LoopLMLM, run_eval, _extract_acc
+from src.utils.checkpoint import load_checkpoint_safe
 
 
 # ---------------------------------------------------------------------------
@@ -54,13 +55,14 @@ def load_checkpoint(
     checkpoint_path: str,
     device: torch.device,
     num_steps_override: int | None = None,
+    trust: bool = False,
 ) -> tuple[LoopLM, LoopLMConfig, int]:
-    """Load a LoopLM checkpoint.
+    """Load a LoopLM checkpoint safely.
 
     Returns:
         (model, config, num_steps_to_use)
     """
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt = load_checkpoint_safe(checkpoint_path, map_location=device, trust=trust)
     config = LoopLMConfig(**ckpt["model_config"])
     model = LoopLM(config)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -110,6 +112,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Evaluate at T=1..max_recurrent_steps and print a depth comparison table.",
     )
+    p.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Allow loading non-primitive objects from checkpoint if safe loading fails.",
+    )
     return p.parse_args()
 
 
@@ -138,7 +145,9 @@ def main() -> None:
     tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
 
     print(f"Loading checkpoint: {args.checkpoint}")
-    model, config, default_steps = load_checkpoint(args.checkpoint, device, args.num_steps)
+    model, config, default_steps = load_checkpoint(
+        args.checkpoint, device, args.num_steps, trust=args.trust_checkpoint
+    )
 
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM2-135M")
 

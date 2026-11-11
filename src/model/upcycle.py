@@ -18,6 +18,7 @@ from torch import Tensor
 
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
+from src.utils import load_checkpoint_safe
 
 
 def upcycle_state_dict(
@@ -113,6 +114,7 @@ def upcycle_checkpoint(
     source_checkpoint_path: str | Path,
     target_checkpoint_path: str | Path,
     target_layers: int | None = None,
+    trust: bool = False,
 ) -> Path:
     """Load a LoopLM checkpoint, upcycle its layers, and save the resulting checkpoint.
 
@@ -122,6 +124,7 @@ def upcycle_checkpoint(
         source_checkpoint_path: path to input .pt checkpoint.
         target_checkpoint_path: path to write upcycled .pt checkpoint.
         target_layers:          target layer count (default: 2 * source layers).
+        trust:                  allow unpickling legacy checkpoints with arbitrary types.
 
     Returns:
         Path to saved upcycled checkpoint.
@@ -130,7 +133,7 @@ def upcycle_checkpoint(
     dst_path = Path(target_checkpoint_path)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ckpt = torch.load(src_path, map_location="cpu", weights_only=False)
+    ckpt = load_checkpoint_safe(src_path, map_location="cpu", trust=trust)
 
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         # Full Trainer checkpoint

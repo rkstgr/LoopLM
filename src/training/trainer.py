@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
 from src.training.objectives import compute_adaptive_gate_loss, compute_looplm_loss, compute_q_act_loss
+from src.utils.checkpoint import load_checkpoint_safe
 
 
 @dataclass
@@ -451,9 +452,9 @@ class Trainer:
         )
         return path
 
-    def load_checkpoint(self, path: str | Path) -> int:
+    def load_checkpoint(self, path: str | Path, trust: bool = False) -> int:
         """Load checkpoint and return the step it was saved at."""
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = load_checkpoint_safe(path, map_location=self.device, trust=trust)
         self.raw_model.load_state_dict(ckpt["model_state_dict"])
         if "optimizer_state_dict" in ckpt:
             self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -627,9 +628,9 @@ class GateFinetuner:
 
     # ── Checkpointing ──────────────────────────────────────────────────────────
 
-    def load_checkpoint(self, path: str | Path) -> int:
+    def load_checkpoint(self, path: str | Path, trust: bool = False) -> int:
         """Load model weights from a Stage I (or gate) checkpoint."""
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = load_checkpoint_safe(path, map_location=self.device, trust=trust)
         self.model.load_state_dict(ckpt["model_state_dict"])
         # Re-freeze after load_state_dict (doesn't touch requires_grad)
         self._freeze_lm_params()

@@ -60,11 +60,13 @@ LoopLM/
 │   │   ├── kv_cache.py          # KV cache sharing (last_step, full, averaged, first_step)
 │   │   ├── early_exit.py        # Token-level Q-exit, static exit, hidden state diff
 │   │   └── lm_eval_wrapper.py   # LM Evaluation Harness integration (LoopLMLM adapter)
-│   └── analysis/
-│       ├── capo.py              # Section 6.1: Knowledge Capacity (memorization bits/param)
-│       ├── mano.py              # Section 6.2: Knowledge Manipulation (tree arithmetic mod 23)
-│       ├── arithmetic.py        # Prefix-notation modular arithmetic generator
-│       └── gen_name.py          # Entity & synthetic graph generator
+│   ├── analysis/
+│   │   ├── capo.py              # Section 6.1: Knowledge Capacity (memorization bits/param)
+│   │   ├── mano.py              # Section 6.2: Knowledge Manipulation (tree arithmetic mod 23)
+│   │   ├── arithmetic.py        # Prefix-notation modular arithmetic generator
+│   │   └── gen_name.py          # Entity & synthetic graph generator
+│   └── utils/
+│       └── checkpoint.py        # Safe checkpoint loader (weights_only & allowlist)
 ├── scripts/
 │   ├── train.py                 # Stage I continuous pre-training (CLI, multi-stage)
 │   ├── finetune_gate.py         # Stage II adaptive gate fine-tuning (frozen LM)
@@ -73,12 +75,16 @@ LoopLM/
 │   ├── analyze.py               # Capo and Mano experiment suite & SLURM collector
 │   ├── upcycle.py               # CLI for model upcycling (24 -> 48 layers)
 │   ├── convert_ouro_hf.py       # CLI for ByteDance Ouro Hugging Face weight conversion
+│   ├── verify_artifacts.py      # SHA-256 checksum verification for cached tokenizers
+│   ├── check_secrets.py         # Pre-commit secret & API key scanner
 │   ├── pretokenize_smollm.py    # Offline dataset pre-tokenization
 │   ├── download_artifacts.sh    # Pre-stage HF artifacts for offline HPC nodes
 │   └── *.slurm                  # HPC SLURM job array scripts (JUWELS H100)
-├── tests/                       # 15 test suites (262 tests passing)
+├── tests/                       # Test suites (260+ tests passing)
 ├── paper/                       # Ouro, Capo/Mano, and HRM research papers
+├── .pre-commit-config.yaml      # Pre-commit hooks for secret scanning & code hygiene
 ├── CONTRIBUTORS.md              # Project authors and AI contributors
+├── LICENSE                      # Apache License 2.0
 ├── pyproject.toml
 └── README.md
 ```
@@ -313,11 +319,18 @@ res = model.generate(
 print("Generated token IDs:", res.sequences)
 ```
 
-## Contributors
+## Contributors & Attribution
 
-See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the full list of project contributors.
-- **supus4562** — Core architecture, training framework, evaluation harness.
-- **Claude** (Anthropic) — KV-cache sharing, token-level early exit matching Ouro, multi-stage training pipeline, model upcycling (1.4B → 2.6B), and official ByteDance Hugging Face weight converter.
+This repository is a downstream fork of [`rkstgr/LoopLM`](https://github.com/rkstgr/LoopLM).
+- **Erik Steiger** ([@rkstgr](https://github.com/rkstgr), `rkstgr@gmail.com`) — Original author and creator of the upstream codebase (commits 1–58 up to snapshot `8d79e31`), including core recurrence loop, sandwich normalization, Q-ACT, gate finetuning, MANO analysis, training harness, and HPC scripts.
+- **supus4562** ([@supus4562](https://github.com/supus4562)) — Fork maintainer; architecture extensions, multi-stage curriculum training integration, upcycling infrastructure, KV-cache sharing, checkpoint safety, and tooling.
+- **Claude** (Anthropic) — AI contributor: KV-cache sharing, token-level early exit matching Ouro, multi-stage training pipeline with RoPE annealing, model upcycling (1.4B → 2.6B), official ByteDance Hugging Face weight converter, and checkpoint safety wrappers.
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for full attribution details.
+
+## License
+
+This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.
 
 
 ## Future Ideas
