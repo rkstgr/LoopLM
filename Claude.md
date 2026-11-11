@@ -53,7 +53,8 @@ looplm/
 │   ├── convert_ouro_hf.py       # CLI for ByteDance Ouro Hugging Face weight conversion
 │   ├── pretokenize_smollm.py    # Offline dataset pre-tokenization
 │   ├── download_artifacts.sh    # Pre-stage HF artifacts for offline HPC nodes
-│   └── *.slurm                  # HPC SLURM job array scripts (JUWELS H100)
+│   ├── cluster_env.sh.example   # HPC cluster configuration template
+│   └── *.slurm                  # Portable SLURM scripts (train, 1.4B DDP, Mano, Capo)
 ├── tests/                       # 15 test suites (262 tests passing)
 │   ├── test_model.py            # Architecture parameter counts & initialization
 │   ├── test_transformer.py      # Sandwich RMSNorm, SwiGLU, attention blocks
@@ -339,7 +340,7 @@ The looping adds compute but NOT memory (weights are shared).
 - [x] Scale to 1.4B parameters, 24 layers (LoopLMConfig.ouro_1_4b)
 - [x] Upcycling to 2.6B (48 layers via layer duplication, scripts/upcycle.py)
 - [x] Bidirectional ByteDance Hugging Face weight converter (scripts/convert_ouro_hf.py)
-- [ ] Full multi-stage training on larger data budget (JUWELS cluster script scripts/train.slurm)
+- [ ] Full multi-stage training on larger data budget (Modal.com, multi-GPU DDP, or SLURM)
 - [x] Stage II adaptive gate training (GateFinetuner, scripts/finetune_gate.py)
 
 ### Milestone 4: SFT & Evaluation

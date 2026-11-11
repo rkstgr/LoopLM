@@ -68,6 +68,8 @@ LoopLM/
 │   └── utils/
 │       └── checkpoint.py        # Safe checkpoint loader (weights_only & allowlist)
 ├── scripts/
+│   ├── modal_train.py           # Serverless cloud GPU runner (Modal.com)
+│   ├── run_ddp.sh               # Universal multi-GPU DDP launcher (RunPod/Lambda/AWS/GCP)
 │   ├── train.py                 # Stage I continuous pre-training (CLI, multi-stage)
 │   ├── finetune_gate.py         # Stage II adaptive gate fine-tuning (frozen LM)
 │   ├── evaluate.py              # Standalone LM-Eval benchmark runner
@@ -79,7 +81,8 @@ LoopLM/
 │   ├── check_secrets.py         # Pre-commit secret & API key scanner
 │   ├── pretokenize_smollm.py    # Offline dataset pre-tokenization
 │   ├── download_artifacts.sh    # Pre-stage HF artifacts for offline HPC nodes
-│   └── *.slurm                  # HPC SLURM job array scripts (JUWELS H100)
+│   ├── cluster_env.sh.example   # HPC cluster configuration template
+│   └── *.slurm                  # Portable SLURM scripts (train, 1.4B DDP, Mano, Capo)
 ├── tests/                       # Test suites (260+ tests passing)
 ├── paper/                       # Ouro, Capo/Mano, and HRM research papers
 ├── .pre-commit-config.yaml      # Pre-commit hooks for secret scanning & code hygiene
@@ -127,17 +130,60 @@ uv run scripts/finetune_gate.py \
     --k 50.0 --gamma 0.005
 ```
 
-### JUWELS (westai / H100 Cluster Execution)
+## Distributed & Cloud Training
 
-**One-time setup on login node:**
+LoopLM supports seamless training across serverless cloud GPUs, cloud GPU VMs, and academic/enterprise SLURM clusters.
+
+### 1. Serverless Cloud GPUs ([Modal.com](https://modal.com))
+
+Train on cloud GPUs with zero infrastructure management. Checkpoints, Hugging Face caches, and datasets are automatically persisted to cloud volumes:
+
 ```bash
-uv sync
-bash scripts/download_artifacts.sh   # caches tokenizer + dataset into $PROJECT/hf_cache
+# 1. Install modal and authenticate
+uv sync --extra modal
+modal setup
+
+# 2. Train small model (~100M) on a single A10G or A100:
+modal run scripts/modal_train.py --action train --config small --gpu A10G --max-steps 10000
+
+# 3. Train Ouro-1.4B on 4x H100s with gradient accumulation:
+modal run scripts/modal_train.py --action train --config ouro_1_4b --gpu "H100:4" \
+    --batch-size 2 --grad-accum 32 --seq-len 4096 --gradient-checkpointing
+
+# 4. Fine-tune exit gate or evaluate checkpoint on Modal:
+modal run scripts/modal_train.py --action finetune_gate --checkpoint /checkpoints/step_0010000.pt
+modal run scripts/modal_train.py --action eval --checkpoint /checkpoints/step_0010000.pt --tasks hellaswag,arc_easy
 ```
 
-**Submit pre-training:**
+### 2. Cloud GPU Instances (RunPod, Lambda Labs, AWS, GCP, Vast.ai)
+
+Launch multi-GPU distributed data-parallel (DDP) training on any rented instance with automated GPU detection and checkpoint auto-resume:
+
 ```bash
-sbatch scripts/train.slurm
+# Auto-detect all GPUs on the machine and launch DDP:
+bash scripts/run_ddp.sh --model-config small --max-steps 10000
+
+# 4x H100 / A100 DDP training with gradient accumulation:
+bash scripts/run_ddp.sh --gpus 4 --model-config ouro_1_4b \
+    --batch-size 2 --grad-accum-steps 32 --seq-len 4096 --gradient-checkpointing
+```
+
+### 3. Academic & Enterprise HPC Clusters (SLURM)
+
+All SLURM scripts are portable across university and national supercomputing centers (e.g. JUWELS, NERSC Perlmutter, Harvard FASRC, MIT Supercloud):
+
+```bash
+# 1. (Optional) Customize cluster configuration (account, partition, scratch paths):
+cp scripts/cluster_env.sh.example scripts/cluster_env.sh
+
+# 2. Pre-stage tokenizer & dataset (on login node with internet access):
+bash scripts/download_artifacts.sh
+
+# 3. Submit pre-training job (pass account & partition if required by your cluster):
+sbatch --account=YOUR_ACCOUNT --partition=gpu scripts/train.slurm
+
+# 4. Multi-GPU 1.4B pre-training (4x H100 DDP):
+sbatch --account=YOUR_ACCOUNT --partition=gpu scripts/pretrain_1_4b.slurm
 ```
 
 ## Research & Analysis (Capo & Mano)
@@ -223,7 +269,7 @@ uv run pytest -x
 - [x] Training loop (AdamW, grad clip, checkpointing, wandb)
 - [x] Data pipeline (HuggingFace datasets, tokenization)
 - [x] Training entry point (`scripts/train.py`)
-- [x] SLURM job script for JUWELS westai (H100)
+- [x] Distributed training support (Modal.com serverless, cloud GPU DDP, and portable SLURM)
 - [x] Early exit inference strategies (token-level Q-exit matching Ouro, hidden state diff)
 - [x] KV cache sharing for efficient decode (last_step, full, averaged, first_step)
 - [x] Evaluation harness integration (lm-eval wrapper)
