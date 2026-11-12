@@ -1,31 +1,37 @@
 #!/usr/bin/env bash
-#SBATCH --account=westai0047
-#SBATCH --partition=dc-hwai
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=04:00:00
 #SBATCH --job-name=looplm_small
-#SBATCH --output=/p/scratch/westai0047/looplm/logs/%x_%j.out
-#SBATCH --error=/p/scratch/westai0047/looplm/logs/%x_%j.err
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+# Note: Specify --account and --partition on the command line if required by your cluster:
+#     sbatch --account=YOUR_ACCOUNT --partition=YOUR_PARTITION scripts/train.slurm
+# Or configure scripts/cluster_env.sh (from scripts/cluster_env.sh.example).
 
 set -euo pipefail
 
-module load uv
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "${SCRIPT_DIR}/cluster_env.sh" ] && source "${SCRIPT_DIR}/cluster_env.sh" || true
+
+command -v uv &>/dev/null || module load uv 2>/dev/null || true
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-REPO_DIR="${PROJECT}/LoopLM"
-CKPT_DIR="${SCRATCH}/looplm/checkpoints"
-WANDB_DIR="${SCRATCH}/looplm/wandb"
-LOG_DIR="${SCRATCH}/looplm/logs"
+REPO_DIR="${REPO_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+SCRATCH="${SCRATCH:-${HOME}/scratch}"
+PROJECT="${PROJECT:-${HOME}}"
+CKPT_DIR="${CKPT_DIR:-${SCRATCH}/looplm/checkpoints}"
+WANDB_DIR="${WANDB_DIR:-${SCRATCH}/looplm/wandb}"
+LOG_DIR="${LOG_DIR:-${SCRATCH}/looplm/logs}"
 
-mkdir -p "$CKPT_DIR" "$WANDB_DIR" "$LOG_DIR"
+mkdir -p "$CKPT_DIR" "$WANDB_DIR" "$LOG_DIR" "${REPO_DIR}/logs"
 
 # ── HuggingFace: use pre-staged cache, block network downloads ────────────────
-export HF_HOME="${PROJECT}/hf_cache"
-export HF_DATASETS_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+export HF_HOME="${HF_HOME:-${PROJECT}/hf_cache}"
+export HF_DATASETS_OFFLINE=${HF_DATASETS_OFFLINE:-1}
+export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 
 # ── wandb: write offline runs to scratch, sync to cloud from login node ───────
 export WANDB_MODE=offline

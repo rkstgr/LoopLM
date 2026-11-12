@@ -10,10 +10,18 @@ from src.model.looplm import LoopLM
 from src.inference.kv_cache import (
     LayerKVCache,
     StepCache,
+    KVCache,
+    GenerateResult,
     prefill,
+    extract_decode_cache,
+    decode_one_token,
     decode_one_token_full,
     decode_one_token_last_step,
+    decode_one_token_first_step,
+    decode_one_token_averaged,
+    generate,
 )
+
 
 
 # ---------------------------------------------------------------------------
@@ -230,3 +238,201 @@ class TestMemorySavings:
         assert full_cache_layers == T * L
         assert last_step_cache_layers == L
         assert full_cache_layers == T * last_step_cache_layers
+
+
+# ---------------------------------------------------------------------------
+# extract_decode_cache
+# ---------------------------------------------------------------------------
+
+class TestExtractDecodeCache:
+    def test_extract_last_step(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        cache = extract_decode_cache(step_caches, strategy="last_step")
+        assert len(cache) == model.config.num_layers
+        assert cache is step_caches[-1]
+
+    def test_extract_first_step(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        cache = extract_decode_cache(step_caches, strategy="first_step")
+        assert len(cache) == model.config.num_layers
+        assert cache is step_caches[0]
+
+    def test_extract_averaged(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        cache = extract_decode_cache(step_caches, strategy="averaged")
+        assert len(cache) == model.config.num_layers
+        # Check averaged shape matches
+        for lkv in cache:
+            assert lkv.k.shape == step_caches[0][0].k.shape
+            assert lkv.v.shape == step_caches[0][0].v.shape
+
+    def test_extract_full(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        cache = extract_decode_cache(step_caches, strategy="full")
+        assert len(cache) == model.config.max_recurrent_steps
+
+    def test_extract_unknown_strategy_raises(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        with pytest.raises(ValueError):
+            extract_decode_cache(step_caches, strategy="invalid_strategy")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# decode_one_token_first_step
+# ---------------------------------------------------------------------------
+
+class TestDecodeOneFirstStep:
+    def test_logits_shape(self, model, prompt, next_token):
+        _, step_caches = prefill(model, prompt)
+        first_cache = step_caches[0]
+        logits, new_cache = decode_one_token_first_step(model, next_token, first_cache, start_pos=8)
+        assert logits.shape == (1, 1, model.config.vocab_size)
+        assert len(new_cache) == model.config.num_layers
+        assert new_cache[0].k.shape[2] == 9
+
+    def test_two_decode_steps(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        cache = step_caches[0]
+        tok1 = torch.randint(0, 256, (1, 1))
+        tok2 = torch.randint(0, 256, (1, 1))
+        logits1, cache = decode_one_token_first_step(model, tok1, cache, start_pos=8)
+        logits2, cache = decode_one_token_first_step(model, tok2, cache, start_pos=9)
+        assert logits1.shape == (1, 1, model.config.vocab_size)
+        assert logits2.shape == (1, 1, model.config.vocab_size)
+
+
+# ---------------------------------------------------------------------------
+# decode_one_token_averaged
+# ---------------------------------------------------------------------------
+
+class TestDecodeOneAveraged:
+    def test_logits_shape(self, model, prompt, next_token):
+        _, step_caches = prefill(model, prompt)
+        avg_cache = extract_decode_cache(step_caches, strategy="averaged")
+        logits, new_cache = decode_one_token_averaged(model, next_token, avg_cache, start_pos=8)
+        assert logits.shape == (1, 1, model.config.vocab_size)
+        assert len(new_cache) == model.config.num_layers
+        assert new_cache[0].k.shape[2] == 9
+
+    def test_two_decode_steps(self, model, prompt):
+        _, step_caches = prefill(model, prompt)
+        avg_cache = extract_decode_cache(step_caches, strategy="averaged")
+        tok1 = torch.randint(0, 256, (1, 1))
+        tok2 = torch.randint(0, 256, (1, 1))
+        logits1, avg_cache = decode_one_token_averaged(model, tok1, avg_cache, start_pos=8)
+        logits2, avg_cache = decode_one_token_averaged(model, tok2, avg_cache, start_pos=9)
+        assert logits1.shape == (1, 1, model.config.vocab_size)
+        assert logits2.shape == (1, 1, model.config.vocab_size)
+
+
+# ---------------------------------------------------------------------------
+# Unified decode_one_token dispatcher
+# ---------------------------------------------------------------------------
+
+class TestUnifiedDecodeOneToken:
+    def test_dispatch_all_strategies(self, model, prompt, next_token):
+        _, step_caches = prefill(model, prompt)
+        for strategy in ["last_step", "first_step", "averaged", "full"]:
+            cache = extract_decode_cache(step_caches, strategy=strategy)  # type: ignore[arg-type]
+            logits, updated_cache = decode_one_token(
+                model, next_token, cache, start_pos=8, strategy=strategy  # type: ignore[arg-type]
+            )
+            assert logits.shape == (1, 1, model.config.vocab_size)
+            assert torch.isfinite(logits).all()
+
+
+# ---------------------------------------------------------------------------
+# KVCache pre-allocated buffer
+# ---------------------------------------------------------------------------
+
+class TestKVCacheBuffer:
+    def test_init_and_get_view(self):
+        k = torch.randn(1, 4, 8, 16)
+        v = torch.randn(1, 4, 8, 16)
+        cache = KVCache.from_tensors(k, v, max_seq_len=32)
+        assert cache.seq_len == 8
+        k_view, v_view = cache.get_view()
+        assert torch.allclose(k_view, k)
+        assert torch.allclose(v_view, v)
+
+    def test_append_grows_capacity(self):
+        k = torch.randn(1, 2, 4, 8)
+        v = torch.randn(1, 2, 4, 8)
+        cache = KVCache.from_tensors(k, v, max_seq_len=6)
+        k_new = torch.randn(1, 2, 1, 8)
+        v_new = torch.randn(1, 2, 1, 8)
+        cache.append(k_new, v_new)
+        assert cache.seq_len == 5
+        # Append beyond max_seq_len -> triggers _grow
+        cache.append(k_new, v_new)
+        cache.append(k_new, v_new)
+        assert cache.seq_len == 7
+        assert cache.max_seq_len >= 7
+
+
+# ---------------------------------------------------------------------------
+# generate end-to-end
+# ---------------------------------------------------------------------------
+
+class TestGenerate:
+    def test_generate_shape(self, model, prompt):
+        B, S = prompt.shape
+        max_new = 5
+        res = generate(model, prompt, max_new_tokens=max_new, strategy="last_step")
+        assert isinstance(res, GenerateResult)
+        assert res.sequences.shape == (B, S + max_new)
+        assert res.new_tokens.shape == (B, max_new)
+
+    def test_generate_all_strategies(self, model, prompt):
+        for strategy in ["last_step", "full", "averaged", "first_step"]:
+            res = generate(model, prompt, max_new_tokens=3, strategy=strategy)  # type: ignore[arg-type]
+            assert res.new_tokens.shape == (1, 3)
+
+    def test_generate_eos_early_stop(self, model):
+        prompt = torch.tensor([[10, 20]])
+        # Find the argmax token to simulate immediate eos stop
+        with torch.no_grad():
+            out = model(prompt)
+            target_eos = out.logits[-1][0, -1].argmax().item()
+
+        res = generate(
+            model,
+            prompt,
+            max_new_tokens=10,
+            temperature=0.0,
+            eos_token_id=target_eos,
+            strategy="last_step",
+        )
+        # Should stop after generating the target_eos token (1 token)
+        assert res.new_tokens.shape == (1, 1)
+        assert res.new_tokens[0, 0].item() == target_eos
+
+    def test_model_generate_method(self, model, prompt):
+        res = model.generate(prompt, max_new_tokens=4, strategy="last_step")
+        assert res.new_tokens.shape == (1, 4)
+
+    def test_t1_cached_vs_non_cached_greedy_identical(self, model_t1, prompt):
+        """When T=1, cached decode must match non-cached full forward pass exactly."""
+        res_cached = generate(
+            model_t1, prompt, max_new_tokens=4, temperature=0.0, use_cache=True, strategy="last_step"
+        )
+        res_uncached = generate(
+            model_t1, prompt, max_new_tokens=4, temperature=0.0, use_cache=False
+        )
+        assert torch.equal(res_cached.sequences, res_uncached.sequences), (
+            "Greedy sequences should match between cached and uncached forward pass for T=1"
+        )
+
+    def test_sampling_options(self, model, prompt):
+        # Sampling with temperature, top_k, top_p
+        res = generate(
+            model,
+            prompt,
+            max_new_tokens=4,
+            temperature=0.8,
+            top_k=20,
+            top_p=0.9,
+            strategy="last_step",
+        )
+        assert res.new_tokens.shape == (1, 4)
+

@@ -1,6 +1,13 @@
 [project]
 name = "looplm"
 version = "0.1.0"
+description = "Looped Language Model research implementation"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "supus4562", email = "hamza3140000@gmail.com" },
+    { name = "Erik Steiger", email = "rkstgr@gmail.com" },
+]
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0",
@@ -15,6 +22,17 @@ dependencies = [
 dev = [
     "pytest",
 ]
+modal = [
+    "modal>=0.60.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

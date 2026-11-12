@@ -1,0 +1,20 @@
+# .pre-commit-config.yaml
+# See https://pre-commit.com for more information
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+
+  - repo: local
+    hooks:
+      - id: check-secrets
+        name: Secret and Token Scanner
+        entry: uv run python scripts/check_secrets.py
+        language: system
+        types: [text]
+        exclude: ^(tests/test_checkpoint_and_security\.py)$

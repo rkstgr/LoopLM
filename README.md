@@ -38,105 +38,225 @@ uv run scripts/train.py \
     --output-dir ./checkpoints
 ```
 
-### Mano task
-
-`scripts/mano.slurm` — Rewritten as a SLURM job array:
-  - --array=0-8 runs 9 tasks (3 configs × 3 seeds), each with 1 GPU
-  - Maps SLURM_ARRAY_TASK_ID → (config, seed) using bash arrays
-  - Each task writes to $OUT_DIR/task_<ID>/mano_results.csv
-  - Logs use %A_%a pattern (array job ID + task ID)
-
-  `scripts/analyze.py` — Added mano-collect subcommand:
-  - Reads all */mano_results.csv files from the input directory
-  - Groups by (num_layers, loop_count, total_depth), computes mean ± std
-  - Prints a formatted table and writes mano_results_combined.csv
-
-  Usage:
-  # Submit all 9 jobs in parallel
-  ```bash
-  sbatch scripts/mano.slurm
-  ```
-
-  # After all complete, aggregate results
-  ```bash
-  uv run scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
-  ```
-
-### JUWELS (westai / H100)
-
-**One-time setup on login node** (needs internet):
-
-```bash
-uv sync
-bash scripts/download_artifacts.sh   # caches tokenizer + dataset into $PROJECT/hf_cache
-```
-
-**Submit job:**
-
-```bash
-# Set --account in scripts/train.slurm first, then:
-sbatch scripts/train.slurm
-```
-
-**Monitor:**
-
-```bash
-squeue --me
-tail -f $(ls -t ${SCRATCH}/looplm/logs/*.out | head -1)
-```
-
-**After completion — sync wandb from login node:**
-
-```bash
-wandb sync ${SCRATCH}/looplm/wandb/offline-run-*/
-```
-
-Compute nodes have no internet access. The SLURM script sets `HF_DATASETS_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and `WANDB_MODE=offline` automatically.
-
-## Running Tests
-
-```bash
-uv run --with pytest pytest tests/ -v
-```
-
-Stop at first failure:
-
-```bash
-uv run --with pytest pytest tests/ -x -v
-```
-
 ## Project Structure
 
 ```
-src/
-  model/
-    config.py        # LoopLMConfig dataclass (small ~100M, ouro_1_4b, ouro_2_6b)
-    rope.py          # Rotary position embeddings with configurable base frequency
-    transformer.py   # TransformerBlock with sandwich norm, SwiGLU, RoPE
-    looplm.py        # LoopLM: recurrent forward pass, exit gate, per-step logits
-  training/
-    objectives.py    # Stage I entropy-regularized loss; Stage II adaptive gate loss
-    trainer.py       # Training loop: AdamW, grad clip, checkpointing, wandb logging
-    data.py          # HuggingFace dataset loading and tokenization
-scripts/
-  train.py                  # Training entry point (argparse CLI)
-  train.slurm               # SLURM job script for JUWELS westai partition
-  download_artifacts.sh     # Pre-stage HF artifacts on login node
-configs/
-  small.yaml                # ~100M params (6 layers, hidden 768, 12 heads)
-  medium.yaml               # ~400M params
-  ouro_1_4b.yaml            # 1.4B, 24 layers, hidden 2048
-  ouro_2_6b.yaml            # 2.6B, 48 layers, hidden 2048
-tests/                      # 74 tests covering all modules above
+LoopLM/
+├── src/
+│   ├── model/
+│   │   ├── config.py            # LoopLMConfig (small ~100M, ouro_1_4b, ouro_2_6b)
+│   │   ├── looplm.py            # LoopLM: recurrent forward pass, exit gate, generation
+│   │   ├── transformer.py       # TransformerBlock with sandwich norm, SwiGLU, RoPE MHA
+│   │   ├── rope.py              # Rotary position embeddings with dynamic base annealing
+│   │   ├── upcycle.py           # Model upcycling (layer duplication 24L -> 48L)
+│   │   ├── hf_converter.py      # Bidirectional ByteDance Ouro HF converter (safetensors)
+│   │   └── moe_layer.py         # Mixture-of-Experts recurrent layer ablation
+│   ├── training/
+│   │   ├── trainer.py           # Multi-stage Trainer (1a-4, RoPE annealing, DDP, AMP)
+│   │   ├── objectives.py        # Stage I joint loss & Stage II adaptive gate loss
+│   │   ├── data.py              # HuggingFace datasets & pre-tokenized DataLoader
+│   │   └── adam_atan2.py        # Adam-atan2 optimizer
+│   ├── inference/
+│   │   ├── kv_cache.py          # KV cache sharing (last_step, full, averaged, first_step)
+│   │   ├── early_exit.py        # Token-level Q-exit, static exit, hidden state diff
+│   │   └── lm_eval_wrapper.py   # LM Evaluation Harness integration (LoopLMLM adapter)
+│   ├── analysis/
+│   │   ├── capo.py              # Section 6.1: Knowledge Capacity (memorization bits/param)
+│   │   ├── mano.py              # Section 6.2: Knowledge Manipulation (tree arithmetic mod 23)
+│   │   ├── arithmetic.py        # Prefix-notation modular arithmetic generator
+│   │   └── gen_name.py          # Entity & synthetic graph generator
+│   └── utils/
+│       └── checkpoint.py        # Safe checkpoint loader (weights_only & allowlist)
+├── scripts/
+│   ├── modal_train.py           # Serverless cloud GPU runner (Modal.com)
+│   ├── run_ddp.sh               # Universal multi-GPU DDP launcher (RunPod/Lambda/AWS/GCP)
+│   ├── train.py                 # Stage I continuous pre-training (CLI, multi-stage)
+│   ├── finetune_gate.py         # Stage II adaptive gate fine-tuning (frozen LM)
+│   ├── evaluate.py              # Standalone LM-Eval benchmark runner
+│   ├── eval_checkpoints.py      # Multi-checkpoint evaluation across recurrent steps
+│   ├── analyze.py               # Capo and Mano experiment suite & SLURM collector
+│   ├── upcycle.py               # CLI for model upcycling (24 -> 48 layers)
+│   ├── convert_ouro_hf.py       # CLI for ByteDance Ouro Hugging Face weight conversion
+│   ├── verify_artifacts.py      # SHA-256 checksum verification for cached tokenizers
+│   ├── check_secrets.py         # Pre-commit secret & API key scanner
+│   ├── pretokenize_smollm.py    # Offline dataset pre-tokenization
+│   ├── download_artifacts.sh    # Pre-stage HF artifacts for offline HPC nodes
+│   ├── cluster_env.sh.example   # HPC cluster configuration template
+│   └── *.slurm                  # Portable SLURM scripts (train, 1.4B DDP, Mano, Capo)
+├── tests/                       # Test suites (260+ tests passing)
+├── paper/                       # Ouro, Capo/Mano, and HRM research papers
+├── .pre-commit-config.yaml      # Pre-commit hooks for secret scanning & code hygiene
+├── CONTRIBUTORS.md              # Project authors and AI contributors
+├── LICENSE                      # Apache License 2.0
+├── pyproject.toml
+└── README.md
 ```
 
 ## Model Configs
 
-| Config      | Params | Layers | Hidden | Heads | Recurrent steps |
-|-------------|--------|--------|--------|-------|-----------------|
-| `small()`   | ~100M  | 6      | 768    | 12    | 4               |
-| `ouro_1_4b` | 1.4B   | 24     | 2048   | 16    | 4               |
-| `ouro_2_6b` | 2.6B   | 48     | 2048   | 16    | 4               |
+| Config | Parameters | Layers | Hidden ($d_{\text{model}}$) | Heads | Intermediate | Recurrent Steps ($T$) | RoPE Base |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `small()` | ~100M | 6 | 768 | 12 | 2048 | 4 | 10K |
+| `ouro_1_4b()` | 1.4B | 24 | 2048 | 16 | 5632 | 4 | 10K $\to$ 40K $\to$ 1M |
+| `ouro_2_6b()` | 2.6B | 48 | 2048 | 16 | 5632 | 4 | 10K $\to$ 40K $\to$ 1M |
+
+## Training
+
+### Stage I Pre-Training (Local & Distributed)
+
+```bash
+# Single GPU quick run
+uv run scripts/train.py \
+    --model-config small \
+    --dataset wikitext \
+    --dataset-config wikitext-103-v1 \
+    --max-steps 10000 \
+    --batch-size 8 \
+    --seq-len 512 \
+    --lr 3e-4 \
+    --output-dir ./checkpoints
+```
+
+### Stage II Gate Fine-Tuning
+
+In Stage II, all language model parameters are frozen, and only the exit gate is trained using the detached performance improvement signal ($I_i^{(t)} = \max(0, \mathcal{L}^{(t-1)} - \mathcal{L}^{(t)})$):
+
+```bash
+uv run scripts/finetune_gate.py \
+    --checkpoint checkpoints/step_0010000.pt \
+    --max-steps 5000 \
+    --batch-size 8 \
+    --seq-len 512 \
+    --k 50.0 --gamma 0.005
+```
+
+## Distributed & Cloud Training
+
+LoopLM supports seamless training across serverless cloud GPUs, cloud GPU VMs, and academic/enterprise SLURM clusters.
+
+### 1. Serverless Cloud GPUs ([Modal.com](https://modal.com))
+
+Train on cloud GPUs with zero infrastructure management. Checkpoints, Hugging Face caches, and datasets are automatically persisted to cloud volumes:
+
+```bash
+# 1. Install modal and authenticate
+uv sync --extra modal
+modal setup
+
+# 2. Train small model (~100M) on a single A10G or A100:
+modal run scripts/modal_train.py --action train --config small --gpu A10G --max-steps 10000
+
+# 3. Train Ouro-1.4B on 4x H100s with gradient accumulation:
+modal run scripts/modal_train.py --action train --config ouro_1_4b --gpu "H100:4" \
+    --batch-size 2 --grad-accum 32 --seq-len 4096 --gradient-checkpointing
+
+# 4. Fine-tune exit gate or evaluate checkpoint on Modal:
+modal run scripts/modal_train.py --action finetune_gate --checkpoint /checkpoints/step_0010000.pt
+modal run scripts/modal_train.py --action eval --checkpoint /checkpoints/step_0010000.pt --tasks hellaswag,arc_easy
+```
+
+### 2. Cloud GPU Instances (RunPod, Lambda Labs, AWS, GCP, Vast.ai)
+
+Launch multi-GPU distributed data-parallel (DDP) training on any rented instance with automated GPU detection and checkpoint auto-resume:
+
+```bash
+# Auto-detect all GPUs on the machine and launch DDP:
+bash scripts/run_ddp.sh --model-config small --max-steps 10000
+
+# 4x H100 / A100 DDP training with gradient accumulation:
+bash scripts/run_ddp.sh --gpus 4 --model-config ouro_1_4b \
+    --batch-size 2 --grad-accum-steps 32 --seq-len 4096 --gradient-checkpointing
+```
+
+### 3. Academic & Enterprise HPC Clusters (SLURM)
+
+All SLURM scripts are portable across university and national supercomputing centers (e.g. JUWELS, NERSC Perlmutter, Harvard FASRC, MIT Supercloud):
+
+```bash
+# 1. (Optional) Customize cluster configuration (account, partition, scratch paths):
+cp scripts/cluster_env.sh.example scripts/cluster_env.sh
+
+# 2. Pre-stage tokenizer & dataset (on login node with internet access):
+bash scripts/download_artifacts.sh
+
+# 3. Submit pre-training job (pass account & partition if required by your cluster):
+sbatch --account=YOUR_ACCOUNT --partition=gpu scripts/train.slurm
+
+# 4. Multi-GPU 1.4B pre-training (4x H100 DDP):
+sbatch --account=YOUR_ACCOUNT --partition=gpu scripts/pretrain_1_4b.slurm
+```
+
+## Research & Analysis (Capo & Mano)
+
+LoopLM provides reproduction suites for the empirical experiments in Section 6 of the paper:
+
+### Knowledge Manipulation (Mano Task — Section 6.2)
+Trains models on modular arithmetic tree expressions (mod 23) to evaluate whether recurrent depth enhances multi-step manipulation under iso-FLOP budgets:
+
+```bash
+# Paper reproduction with learning rate search across seeds
+uv run scripts/analyze.py mano \
+    --max-ops 10 \
+    --model-preset paper \
+    --lr-search \
+    --num-seeds 3 \
+    --report-best
+
+# Submit 9 parallel SLURM array jobs on cluster
+sbatch scripts/mano.slurm
+
+# Aggregate results across all seed tasks into mano_results_combined.csv
+uv run scripts/analyze.py mano-collect --input-dir ${SCRATCH}/looplm/mano
+```
+
+### Knowledge Capacity (Capo Task — Section 6.1)
+Measures memorization capacity (bits of knowledge per parameter) across model sizes (`micro`, `mini`, `small`) comparing $T=1$ vs. $T=4$:
+
+```bash
+uv run scripts/analyze.py capo \
+    --n-individuals 20000 \
+    --train-exposures 1000 \
+    --model-sizes micro mini small \
+    --loop-counts 1 4 \
+    --num-seeds 3
+
+# Aggregate Capo SLURM array jobs
+uv run scripts/analyze.py capo-collect --input-dir ${SCRATCH}/looplm/capo
+```
+
+## Evaluation Harness Integration
+
+Evaluate LoopLM checkpoints against standard benchmarks (ARC-Easy, ARC-Challenge, HellaSwag, MMLU, GSM8K) across different recurrent depths $T=1..T_{\text{max}}$:
+
+```bash
+# Evaluate across all recurrent steps T=1..4
+uv run scripts/evaluate.py \
+    --checkpoint checkpoints/step_0010000.pt \
+    --tasks arc_easy,hellaswag \
+    --eval-all-steps \
+    --limit 100
+
+# Batch evaluate checkpoints in a directory
+uv run scripts/eval_checkpoints.py \
+    --checkpoint-dir checkpoints/ \
+    --tasks arc_easy \
+    --eval-all-steps
+```
+
+## Running Tests
+
+The test suite contains **262 tests across 15 test files**, verifying architecture, numerical stability, KV cache, early exit, multi-stage scheduling, and weight conversion:
+
+```bash
+# Run all tests
+uv run pytest
+
+# Verbose output
+uv run pytest -v
+
+# Stop at first failure
+uv run pytest -x
+```
 
 ## Implementation Status
 
@@ -149,14 +269,132 @@ tests/                      # 74 tests covering all modules above
 - [x] Training loop (AdamW, grad clip, checkpointing, wandb)
 - [x] Data pipeline (HuggingFace datasets, tokenization)
 - [x] Training entry point (`scripts/train.py`)
-- [x] SLURM job script for JUWELS westai (H100)
-- [ ] Early exit inference strategies (Q-exit, hidden state diff)
-- [ ] KV cache sharing for efficient decode
-- [ ] Evaluation harness integration (lm-eval)
-- [ ] Multi-stage training (stage transitions, RoPE base annealing)
-- [ ] Scale to 1.4B / upcycling to 2.6B
+- [x] Distributed training support (Modal.com serverless, cloud GPU DDP, and portable SLURM)
+- [x] Early exit inference strategies (token-level Q-exit matching Ouro, hidden state diff)
+- [x] KV cache sharing for efficient decode (last_step, full, averaged, first_step)
+- [x] Evaluation harness integration (lm-eval wrapper)
+- [x] Multi-stage training (stage transitions, RoPE base annealing, Stages 1a-4)
+- [x] Scale to 1.4B / upcycling to 2.6B (layer duplication, HF weight converter)
+
+## Multi-Stage Curriculum Training
+
+LoopLM implements the complete 4-stage training curriculum from Table 1 of the Ouro paper:
+
+- **Stage 1a** ($T=8$, constant LR $3\times 10^{-4}$, $\beta=0.1$, RoPE base $10\text{K}$, 4K context) — initial deep recurrence setup.
+- **Stage 1b** ($T=4$, constant LR $3\times 10^{-4}$, $\beta=0.1$, RoPE base $10\text{K}$, 4K context) — stabilization of gradient dynamics.
+- **Stage 2** ($T=4$, cosine LR $3\times 10^{-5}$, $\beta=0.05$, RoPE base **$40\text{K}$**, 16K context) — reasoning data annealing and context expansion.
+- **Stage 3** ($T=4$, constant LR $3\times 10^{-5}$, $\beta=0.05$, RoPE base **$1\text{M}$**, 64K context) — ultra-long context annealing.
+- **Stage 4** ($T=4$, cosine LR $1\times 10^{-5}$, $\beta=0.05$, RoPE base $1\text{M}$, 32K context) — reasoning SFT fine-tuning.
+
+Stage transitions happen automatically during training, updating learning rate schedules, recurrent steps $T$, entropy penalty $\beta$, RoPE base frequency via `model.rope.set_base(...)`, gradient accumulation steps, and rebuilding DataLoaders for expanded context windows.
+
+```bash
+# Example: 5-stage continuous curriculum
+uv run scripts/train.py \
+    --stage1a-steps 2000 \
+    --stage1b-steps 2000 \
+    --stage2-steps 1500 \
+    --stage3-steps 500 \
+    --stage4-steps 1000 \
+    --batch-size 4 --seq-len 512
+```
+
+## Model Upcycling (1.4B → 2.6B)
+
+Following Section 4.3.1 of the Ouro paper, LoopLM supports **Stability-Driven Upcycling**:
+In Stage 1b, the 24-layer 1.4B model is scaled to 48 layers (2.6B parameters) via layer duplication. Because layers are already trained recurrently, layer 23's outputs reside on the exact manifold layer 0 expects, eliminating representation shock:
+
+```bash
+# Upcycle a 24-layer checkpoint to a 48-layer checkpoint
+uv run scripts/upcycle.py \
+    --input checkpoints/ouro_1_4b_stage1a.pt \
+    --output checkpoints/ouro_2_6b_stage1b.pt \
+    --target-layers 48
+```
+
+## ByteDance Ouro Hugging Face Weight Interoperability
+
+LoopLM provides bidirectional weight conversion with official pre-trained ByteDance checkpoints (`ByteDance/Ouro-1.4B`, `ByteDance/Ouro-2.6B`) using `safetensors`:
+
+```bash
+# 1. Download & convert official ByteDance/Ouro-1.4B from Hugging Face into a LoopLM checkpoint:
+uv run scripts/convert_ouro_hf.py \
+    --hf-model ByteDance/Ouro-1.4B \
+    --output checkpoints/ouro_1_4b.pt
+
+# 2. Export a trained LoopLM checkpoint to Hugging Face format (config.json + model.safetensors):
+uv run scripts/convert_ouro_hf.py \
+    --input-checkpoint checkpoints/step_0010000.pt \
+    --output-dir ./hf_export \
+    --to-hf
+```
+
+Programmatic loading in Python:
+```python
+from src.model import load_from_hf
+
+# Load directly from HuggingFace Hub:
+model = load_from_hf("ByteDance/Ouro-1.4B", device="cuda")
+res = model.generate(input_ids, strategy="last_step")
+```
+
+## Inference & Generation
+
+LoopLM supports efficient autoregressive decoding with **KV-cache sharing** across recurrent steps (Section 5.4.2 & Table 14 of the Ouro paper):
+
+- **`last_step`** (recommended): All decode steps reuse the final recurrent step's KV cache, yielding a **4× memory reduction** with negligible accuracy difference compared to uncompressed KV caches.
+- **`full`**: Uncompressed baseline maintaining separate KV caches for all $T \times L$ layers.
+- **`averaged`**: Maintains a running average of KV representations across recurrent loops.
+- **`first_step`**: Reuses step 1 representations only (ablation baseline).
+
+```python
+import torch
+from src.model.config import LoopLMConfig
+from src.model.looplm import LoopLM
+
+model = LoopLM(LoopLMConfig.small()).eval()
+input_ids = torch.tensor([[1, 42, 108]])
+
+# Autoregressive generation with 4x memory savings via last-step KV sharing:
+res = model.generate(
+    input_ids,
+    max_new_tokens=64,
+    temperature=0.0,      # greedy decode
+    strategy="last_step", # options: "last_step", "full", "averaged", "first_step"
+)
+print("Generated token IDs:", res.sequences)
+```
+
+## Contributors
+
+| Contributor | Role & Contributions |
+|:---|:---|
+| **[@supus4562](https://github.com/supus4562)** | **Maintainer & Lead Contributor** — Architecture extensions, KV-cache sharing, multi-stage curriculum (Stages 1a–4), model upcycling (1.4B → 2.6B), Hugging Face weight converter, Modal.com serverless GPU execution, and security hardening. |
+| **[@rkstgr](https://github.com/rkstgr)** | **Original Creator & Upstream Author** — Foundational looped transformer architecture (commits 1–58), recurrence loop, sandwich normalization, training loop, gate loss, and MANO/Capo analysis. |
+| **Claude** (Anthropic) | **AI Contributor** — Implementation assistance for KV cache sharing, token-level early exit, multi-stage curriculum, upcycling, and cloud runners. |
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for full attribution details.
+
+## Contributing
+
+Contributions from the open-source and research community are warmly welcomed and strongly encouraged!
+
+Whether you want to:
+- Implement new recurrent routing, step-skipping, or KV-cache strategies
+- Benchmark on new reasoning datasets (GSM8K, MATH, ARC, HumanEval)
+- Write custom Triton / CUDA acceleration kernels
+- Explore mechanistic interpretability of looped representation spaces
+- Improve documentation, clean up code, or add test cases
+
+Please feel free to open an issue or submit a pull request. We look forward to collaborating!
+
+## License
+
+This project is licensed under the **Apache License 2.0** — see the [LICENSE](LICENSE) file for details.
+
 
 ## Future Ideas
+
 
 ### Detached recurrence (truncated BPTT)
 Only backprop through the last recurrent step, detaching hidden states between iterations. [HRM](https://arxiv.org/) does this. Eliminates gradient explosion entirely but loses cross-step gradient coordination. Each step still gets a direct loss signal, and since weights are shared, improving one step tends to improve all.
@@ -180,3 +418,4 @@ A curriculum schedule (early recurrence steps first, shift to later steps as tra
 
 - Paper: [arXiv:2510.25741v4](https://arxiv.org/abs/2510.25741)
 - Project page: https://ouro-llm.github.io
+

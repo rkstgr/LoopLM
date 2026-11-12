@@ -189,3 +189,68 @@ class TestRunWithEarlyExit:
         with torch.no_grad():
             result = run_with_early_exit(tiny_model, input_ids, StaticExit(2))
         assert result.logits is not None
+
+
+# ---------------------------------------------------------------------------
+# Token-level and heterogeneous exit tests (Ouro modeling_ouro.py#L781)
+# ---------------------------------------------------------------------------
+
+class TestTokenLevelEarlyExit:
+    def test_compute_token_exit_distribution_properties(self):
+        # 3 steps, batch=2, seq_len=4
+        gate_list = [
+            torch.tensor([[0.2, 0.4, 0.6, 0.8], [0.1, 0.3, 0.5, 0.7]]),
+            torch.tensor([[0.5, 0.5, 0.5, 0.5], [0.8, 0.2, 0.4, 0.6]]),
+            torch.tensor([[0.9, 0.1, 0.3, 0.5], [0.2, 0.4, 0.6, 0.8]]),
+        ]
+        from src.inference.early_exit import compute_token_exit_distribution
+        pdf, cdf = compute_token_exit_distribution(gate_list)
+        assert pdf.shape == (2, 4, 3)
+        assert cdf.shape == (2, 4, 3)
+
+        # Probabilities sum to 1.0 for every token
+        assert torch.allclose(pdf.sum(dim=2), torch.ones(2, 4), atol=1e-6)
+
+        # Final CDF is 1.0 for every token
+        assert torch.allclose(cdf[..., -1], torch.ones(2, 4), atol=1e-6)
+
+        # CDF is non-decreasing across steps
+        for step_idx in range(2):
+            assert (cdf[..., step_idx + 1] >= cdf[..., step_idx] - 1e-6).all()
+
+    def test_token_exit_steps_tensor_shape(self, tiny_model, input_ids):
+        result = run_with_early_exit(tiny_model, input_ids, QExit(0.5, mode="token"))
+        assert result.exit_steps is not None
+        assert result.exit_steps.shape == input_ids.shape
+        assert (result.exit_steps >= 1).all()
+        assert (result.exit_steps <= tiny_model.config.max_recurrent_steps).all()
+        assert 1.0 <= result.mean_exit_step <= float(tiny_model.config.max_recurrent_steps)
+
+    def test_batch_heterogeneous_exit(self, tiny_model):
+        # Batch of 2 with seq_len 8
+        batch_ids = torch.randint(0, 256, (2, 8))
+        result = run_with_early_exit(tiny_model, batch_ids, QExit(0.5, mode="token"))
+        assert result.exit_steps.shape == (2, 8)
+        assert result.logits.shape == (2, 8, tiny_model.config.vocab_size)
+        assert torch.isfinite(result.logits).all()
+
+    def test_sample_mode_exit(self, tiny_model):
+        batch_ids = torch.randint(0, 256, (2, 8))
+        result = run_with_early_exit(tiny_model, batch_ids, QExit(0.5, mode="sample"))
+        assert result.exit_steps.shape == (2, 8)
+        # In sample mode, all tokens within sample 0 share sample 0's exit step
+        assert (result.exit_steps[0] == result.exit_steps[0, 0]).all()
+        assert (result.exit_steps[1] == result.exit_steps[1, 0]).all()
+
+    def test_weighted_exit_mode(self, tiny_model, input_ids):
+        result = run_with_early_exit(tiny_model, input_ids, QExit(0.5, weighted=True))
+        B, S = input_ids.shape
+        assert result.logits.shape == (B, S, tiny_model.config.vocab_size)
+        assert torch.isfinite(result.logits).all()
+
+    def test_gather_matches_per_token_exit_steps(self, tiny_model, input_ids):
+        result = run_with_early_exit(tiny_model, input_ids, QExit(0.5, mode="token"))
+        assert result.exit_pdf is not None
+        assert result.exit_cdf is not None
+        assert result.logits.shape == (input_ids.shape[0], input_ids.shape[1], tiny_model.config.vocab_size)
+

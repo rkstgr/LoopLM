@@ -51,6 +51,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from src.model.config import LoopLMConfig
 from src.model.looplm import LoopLM
+from src.utils.checkpoint import load_checkpoint_safe
 
 
 # ── Modular arithmetic constants ─────────────────────────────────────────────
@@ -627,7 +628,7 @@ def run_mano_single(
 
     if ckpt_path.exists():
         print(f"    Resuming from {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        ckpt = load_checkpoint_safe(ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# scripts/cluster_env.sh.example — Template for HPC cluster environment configuration.
+# Copy this file to scripts/cluster_env.sh and customize for your institution or cluster:
+#
+#     cp scripts/cluster_env.sh.example scripts/cluster_env.sh
+#
+# Once configured, all SLURM scripts will automatically source this file if present,
+# or you can submit jobs with:
+#     sbatch --account=$SLURM_ACCOUNT --partition=$SLURM_PARTITION scripts/train.slurm
+
+# Cluster account and partition
+export SLURM_ACCOUNT="${SLURM_ACCOUNT:-my_cluster_account}"
+export SLURM_PARTITION="${SLURM_PARTITION:-gpu}"
+
+# Base directories for high-speed scratch storage and persistent project data
+export SCRATCH="${SCRATCH:-${HOME}/scratch}"
+export PROJECT="${PROJECT:-${HOME}/project}"
+
+# Cache and logs directories
+export HF_HOME="${HF_HOME:-${PROJECT}/hf_cache}"
+export CKPT_DIR="${CKPT_DIR:-${SCRATCH}/looplm/checkpoints}"
+export WANDB_DIR="${WANDB_DIR:-${SCRATCH}/looplm/wandb}"
+export LOG_DIR="${LOG_DIR:-${SCRATCH}/looplm/logs}"
+
+# Offline settings (recommended for compute nodes with restricted internet access)
+export HF_DATASETS_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export WANDB_MODE=offline

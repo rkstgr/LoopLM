@@ -10,47 +10,68 @@ The paper PDF is at `paper/looplm.pdf`. Reference it when you need architectural
 
 ```
 looplm/
-├── CLAUDE.md                    # This file
-├── paper/
-│   └── looplm.pdf               # The paper for reference
+├── CLAUDE.md                    # This file (implementation guide & roadmap)
+├── README.md                    # Main documentation & reproduction commands
+├── CONTRIBUTORS.md              # Author and AI contributor attributions
+├── Results.md                   # Empirical training & benchmark logs
+├── paper/                       # Research papers (Ouro, Capo/Mano, HRM, MoE)
 ├── src/
 │   ├── __init__.py
 │   ├── model/
 │   │   ├── __init__.py
-│   │   ├── config.py            # Model configs (small, 1.4B, 2.6B)
-│   │   ├── transformer.py       # Base transformer block (RoPE, SwiGLU, sandwich norm)
-│   │   ├── looplm.py            # LoopLM wrapper (recurrence, exit gate, multi-step loss)
-│   │   └── rope.py              # RoPE implementation
+│   │   ├── config.py            # LoopLMConfig dataclass (small, ouro_1_4b, ouro_2_6b)
+│   │   ├── looplm.py            # LoopLM: recurrent forward pass, exit gate, generation
+│   │   ├── transformer.py       # TransformerBlock (sandwich RMSNorm, SwiGLU, RoPE MHA)
+│   │   ├── rope.py              # Rotary position embeddings with dynamic base annealing
+│   │   ├── upcycle.py           # Model upcycling (layer duplication 24L -> 48L)
+│   │   ├── hf_converter.py      # Bidirectional ByteDance Ouro HF converter (safetensors)
+│   │   └── moe_layer.py         # Mixture-of-Experts recurrent layer ablation
 │   ├── training/
 │   │   ├── __init__.py
-│   │   ├── objectives.py        # Entropy-regularized loss, adaptive gate loss
-│   │   ├── trainer.py           # Training loop with multi-stage support
-│   │   └── data.py              # Data loading and tokenization
+│   │   ├── trainer.py           # Multi-stage Trainer (1a-4, RoPE annealing, DDP, AMP)
+│   │   ├── objectives.py        # Stage I joint loss & Stage II adaptive gate loss
+│   │   ├── data.py              # HuggingFace datasets & pre-tokenized DataLoader
+│   │   └── adam_atan2.py        # Adam-atan2 optimizer
 │   ├── inference/
 │   │   ├── __init__.py
-│   │   ├── early_exit.py        # Q-exit, hidden state diff, static exit
-│   │   └── kv_cache.py          # KV cache sharing strategies
+│   │   ├── kv_cache.py          # KV cache sharing (last_step, full, averaged, first_step)
+│   │   ├── early_exit.py        # Token-level Q-exit, static exit, hidden state diff
+│   │   └── lm_eval_wrapper.py   # LM Evaluation Harness integration (LoopLMLM adapter)
 │   └── analysis/
 │       ├── __init__.py
-│       ├── capo.py              # Knowledge capacity experiments
-│       ├── mano.py              # Knowledge manipulation experiments
-│       └── faithfulness.py      # Linear probing, agreement matrices
-├── configs/
-│   ├── small.yaml               # ~100M param config for prototyping
-│   ├── medium.yaml              # ~400M param config
-│   ├── ouro_1_4b.yaml           # Full 1.4B config
-│   └── ouro_2_6b.yaml           # Full 2.6B config
+│       ├── capo.py              # Section 6.1: Knowledge Capacity (memorization bits/param)
+│       ├── mano.py              # Section 6.2: Knowledge Manipulation (tree arithmetic mod 23)
+│       ├── arithmetic.py        # Prefix-notation modular arithmetic generator
+│       └── gen_name.py          # Entity & synthetic graph generator
 ├── scripts/
-│   ├── train.py                 # Entry point for training
-│   ├── evaluate.py              # Entry point for evaluation
-│   └── analyze.py               # Entry point for analysis experiments
-├── tests/
-│   ├── test_model.py            # Unit tests for architecture
-│   ├── test_objectives.py       # Unit tests for loss functions
-│   ├── test_gate.py             # Unit tests for exit gate logic
-│   └── test_inference.py        # Tests for early exit, KV cache
-├── pyproject.toml
-└── README.md
+│   ├── train.py                 # Stage I continuous pre-training (CLI, multi-stage)
+│   ├── finetune_gate.py         # Stage II adaptive gate fine-tuning (frozen LM)
+│   ├── evaluate.py              # Standalone LM-Eval benchmark runner
+│   ├── eval_checkpoints.py      # Multi-checkpoint evaluation across recurrent steps
+│   ├── analyze.py               # Capo and Mano experiment suite & SLURM collector
+│   ├── upcycle.py               # CLI for model upcycling (24 -> 48 layers)
+│   ├── convert_ouro_hf.py       # CLI for ByteDance Ouro Hugging Face weight conversion
+│   ├── pretokenize_smollm.py    # Offline dataset pre-tokenization
+│   ├── download_artifacts.sh    # Pre-stage HF artifacts for offline HPC nodes
+│   ├── cluster_env.sh.example   # HPC cluster configuration template
+│   └── *.slurm                  # Portable SLURM scripts (train, 1.4B DDP, Mano, Capo)
+├── tests/                       # 15 test suites (262 tests passing)
+│   ├── test_model.py            # Architecture parameter counts & initialization
+│   ├── test_transformer.py      # Sandwich RMSNorm, SwiGLU, attention blocks
+│   ├── test_rope.py             # RoPE frequencies, rotations, in-place base annealing
+│   ├── test_looplm.py           # Recurrence loops, exit gate behavior
+│   ├── test_objectives.py       # Stage I loss & entropy regularization
+│   ├── test_gate_loss.py        # Stage II adaptive gate loss math
+│   ├── test_gate_finetune.py    # GateFinetuner class & parameter freezing
+│   ├── test_trainer.py          # Core training step, accumulation, checkpoints
+│   ├── test_multi_stage.py      # Multi-stage scheduling, RoPE annealing, DataLoader swap
+│   ├── test_train_script.py     # End-to-end 5-stage continuous curriculum smoke test
+│   ├── test_inference.py        # Early exit strategies & token-level exit distribution
+│   ├── test_kv_cache.py         # KV cache sharing (last_step, full, averaged) & generation
+│   ├── test_upcycle.py          # Layer duplication (1.4B -> 2.6B) & ByteDance HF converter
+│   ├── test_capo.py             # Knowledge capacity experiments
+│   └── test_mano.py             # Knowledge manipulation experiments
+└── pyproject.toml
 ```
 
 ---
@@ -66,18 +87,19 @@ looplm/
 
 ## Implementation Principles
 1. **Test-driven**: Write tests before or alongside every module. Run `pytest tests/ -x` frequently.
-2. **Small first**: Default config is ~100M params (6 layers, hidden 768, 12 heads). Only scale up after correctness is verified.
+2. **Small first**: Default config is ~100M params (6 layers, hidden 768, 12 heads). Scale to 1.4B / 2.6B via configs or upcycling.
 3. **Modular**: Keep the loop mechanism, exit gate, and loss computation cleanly separated from the base transformer.
 4. **Numerical checks**: After implementing any component, verify shapes and gradient flow with a small forward+backward pass.
 
 ## File Conventions
-- Model code in `src/model/`
-- Training logic in `src/training/`
-- Inference logic in `src/inference/`
-- Analysis experiments in `src/analysis/`
-- Configs in `configs/` as YAML
-- All entry points in `scripts/`
-- Tests in `tests/` mirroring `src/` structure
+- Model architectures & upcycling in `src/model/`
+- Training logic & multi-stage scheduling in `src/training/`
+- Inference logic & KV caching in `src/inference/`
+- Analysis experiments (Capo, Mano, arithmetic) in `src/analysis/`
+- Configs defined as dataclasses in `src/model/config.py` (`small()`, `ouro_1_4b()`, `ouro_2_6b()`)
+- All CLI entry points in `scripts/`
+- Tests in `tests/` mirroring `src/` modules (15 suites, 262 passing tests)
+
 
 ---
 
@@ -301,31 +323,35 @@ The looping adds compute but NOT memory (weights are shared).
 ## Implementation Milestones
 
 ### Milestone 1: Proof of Concept
-- [ ] LoopLM architecture (~100M params, 6 layers, 4 recurrent steps)
-- [ ] Entropy-regularized training objective
-- [ ] Train on FineWeb-Edu subset (~20B tokens)
-- [ ] Verify performance improves with recurrent depth on ARC, HellaSwag
+- [x] LoopLM architecture (~100M params, 6 layers, 4 recurrent steps)
+- [x] Entropy-regularized training objective (Stage I uniform prior ELBO)
+- [x] Small-scale pre-training run (10,000 steps, wikitext-103-v1, see Results.md)
+- [x] Verify performance improves with recurrent depth on ARC-Easy & HellaSwag (see Results.md)
 
 ### Milestone 2: Training Pipeline
-- [ ] Multi-stage training (at minimum Stages 1+2)
-- [ ] Progressive batch size scaling
-- [ ] RoPE base frequency adjustment across stages
-- [ ] β annealing (0.1 → 0.05)
-- [ ] KV cache sharing for efficient inference
+- [x] Multi-stage training (Stages 1a, 1b, 2, 3, 4 with automatic transitions)
+- [x] Progressive batch size scaling (per-stage grad_accum_steps)
+- [x] RoPE base frequency adjustment across stages (10K → 40K → 1M)
+- [x] β annealing (0.1 → 0.05)
+- [x] Dynamic context expansion & DataLoader rebuilding
+- [x] KV cache sharing for efficient inference
 
 ### Milestone 3: Scale Up
-- [ ] Scale to 1.4B parameters, 24 layers
-- [ ] Upcycling to 2.6B (48 layers via layer duplication)
-- [ ] Full multi-stage training on larger data budget
-- [ ] Stage II adaptive gate training
+- [x] Scale to 1.4B parameters, 24 layers (LoopLMConfig.ouro_1_4b)
+- [x] Upcycling to 2.6B (48 layers via layer duplication, scripts/upcycle.py)
+- [x] Bidirectional ByteDance Hugging Face weight converter (scripts/convert_ouro_hf.py)
+- [ ] Full multi-stage training on larger data budget (Modal.com, multi-GPU DDP, or SLURM)
+- [x] Stage II adaptive gate training (GateFinetuner, scripts/finetune_gate.py)
 
 ### Milestone 4: SFT & Evaluation
-- [ ] Reasoning SFT with OpenThoughts3 + AceReason data
-- [ ] Full benchmark evaluation suite
-- [ ] Early exit analysis and comparison
+- [ ] Reasoning SFT on multi-node cluster with OpenThoughts3 / AceReason
+- [x] Full benchmark evaluation suite (lm-eval wrapper, scripts/evaluate.py, scripts/eval_checkpoints.py)
+- [x] Early exit analysis and comparison (token-level Q-exit, static exit, hidden state diff)
 
 ### Milestone 5: Analysis & Ablations
-- [ ] Capo task, Mano task, Multi-hop QA, Faithfulness probing, Safety evaluation
+- [x] Capo task: Knowledge Capacity (memorization bits/parameter, scripts/analyze.py capo)
+- [x] Mano task: Knowledge Manipulation (prefix tree arithmetic mod 23 with LR search, scripts/analyze.py mano)
+- [x] MoE recurrent ablation (src/model/moe_layer.py)
 
 ---
 

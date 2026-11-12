@@ -16,6 +16,8 @@ from src.training.trainer import (
     make_stage_1a,
     make_stage_1b,
     make_stage_2,
+    make_stage_3,
+    make_stage_4,
 )
 
 
@@ -338,3 +340,90 @@ def test_resume_mid_stage_cosine():
 
         assert restored_lr == pytest.approx(expected_lr, rel=1e-4)
         assert restored_lr == pytest.approx(lr_at_5, rel=1e-4)
+
+
+# ── Stage 3 and Stage 4 tests ────────────────────────────────────────────────
+
+def test_make_stage_3_fields():
+    s = make_stage_3(150)
+    assert s.name == "3"
+    assert s.max_steps == 150
+    assert s.lr == pytest.approx(3e-5)
+    assert s.lr_schedule == "constant"
+    assert s.num_recurrent_steps == 4
+    assert s.beta_kl == pytest.approx(0.05)
+    assert s.rope_base == pytest.approx(1_000_000.0)
+    assert s.seq_len is None
+    assert s.grad_accum_steps is None
+
+
+def test_make_stage_4_fields():
+    s = make_stage_4(300)
+    assert s.name == "4"
+    assert s.max_steps == 300
+    assert s.lr == pytest.approx(1e-5)
+    assert s.lr_schedule == "cosine"
+    assert s.num_recurrent_steps == 4
+    assert s.beta_kl == pytest.approx(0.05)
+    assert s.rope_base == pytest.approx(1_000_000.0)
+    assert s.seq_len is None
+    assert s.grad_accum_steps is None
+
+
+def test_stage_config_overrides():
+    s = StageConfig("custom", 100, seq_len=1024, grad_accum_steps=4)
+    assert s.seq_len == 1024
+    assert s.grad_accum_steps == 4
+
+
+def test_stage_transition_updates_grad_accum_steps():
+    model_cfg = _tiny_config()
+    stages = [
+        StageConfig("1", 2, grad_accum_steps=1),
+        StageConfig("2", 2, grad_accum_steps=4),
+    ]
+    trainer_cfg = TrainerConfig(stages=stages, grad_accum_steps=1, log_every=100, save_every=1000)
+    trainer = Trainer(model_cfg, trainer_cfg)
+
+    assert trainer.config.grad_accum_steps == 1
+    trainer.train_step(_random_batch())
+    trainer.train_step(_random_batch())
+
+    assert trainer.stage_idx == 1
+    assert trainer.config.grad_accum_steps == 4
+
+
+def test_stage_transition_rebuilds_dataloader():
+    model_cfg = _tiny_config()
+    rebuild_calls = []
+
+    def mock_factory(seq_len: int, grad_accum: int):
+        rebuild_calls.append((seq_len, grad_accum))
+        return [f"dl_{seq_len}_{grad_accum}"]
+
+    stages = [
+        StageConfig("1", 2, seq_len=64),
+        StageConfig("2", 2, seq_len=128),
+    ]
+    trainer_cfg = TrainerConfig(stages=stages, log_every=100, save_every=1000)
+    trainer = Trainer(
+        model_cfg,
+        trainer_cfg,
+        dataloader_factory=mock_factory,
+        base_seq_len=32,
+    )
+
+    # Initial stage application triggered rebuild to seq_len=64
+    assert len(rebuild_calls) == 1
+    assert rebuild_calls[0] == (64, 1)
+    assert trainer._current_dataloader == ["dl_64_1"]
+
+    # Step through stage 1
+    trainer.train_step(_random_batch())
+    trainer.train_step(_random_batch())
+
+    # Advance to stage 2: triggered rebuild to seq_len=128
+    assert trainer.stage_idx == 1
+    assert len(rebuild_calls) == 2
+    assert rebuild_calls[1] == (128, 1)
+    assert trainer._current_dataloader == ["dl_128_1"]

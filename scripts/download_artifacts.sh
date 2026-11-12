@@ -3,7 +3,7 @@
 # $PROJECT/hf_cache so compute nodes can read them offline.
 set -euo pipefail
 
-HF_CACHE="${PROJECT}/hf_cache"
+HF_CACHE="${HF_CACHE:-${PROJECT:-.}/hf_cache}"
 export HF_HOME="$HF_CACHE"
 
 echo "==> Downloading to $HF_CACHE"
@@ -22,6 +22,9 @@ load_dataset("wikitext", "wikitext-103-v1", split="train")
 
 print("Done. All artifacts cached.")
 EOF
+
+echo "==> Verifying artifact checksums..."
+uv run python scripts/verify_artifacts.py --cache-dir "$HF_CACHE"
 
 echo "==> Cache location: $HF_CACHE"
 du -sh "$HF_CACHE"
